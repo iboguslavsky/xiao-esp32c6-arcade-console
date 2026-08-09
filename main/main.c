@@ -1122,6 +1122,8 @@ void app_main(void) {
                 else { draw_current_piece(false); lock_tetris_piece(); }
                 last_drop_time = now;
             }
+
+            fb_present();
         }
 
         // --- STATE 2: SPACE INVADERS (60 FPS DOUBLE BUFFERED ZERO-FLICKER) ---
@@ -1393,19 +1395,21 @@ void app_main(void) {
 
 
 
-        // --- STATE 4: PONG / TENNIS ---
+        // --- STATE 4: PONG / TENNIS (60 FPS DOUBLE BUFFERED ZERO-FLICKER) ---
         else if (current_game == STATE_PONG) {
             if (pong_game_over) {
                 if (player_score >= 9) draw_string(25, 140, "YOU WIN!", COLOR_GREEN, COLOR_BLACK, 2);
                 else draw_string(25, 140, "COMP WINS!", COLOR_RED, COLOR_BLACK, 2);
                 draw_string(25, 170, "PRESS ROTATE", COLOR_WHITE, COLOR_BLACK, 1);
+                fb_present();
                 sfx_game_over();
                 while (gpio_get_level(BTN_ROTATE) != 0) vTaskDelay(pdMS_TO_TICKS(50));
                 vTaskDelay(pdMS_TO_TICKS(200)); reset_pong_game(); continue;
             }
 
+            // --- PHYSICS & INPUT (unchanged) ---
+
             // Player Paddle Controls (ROTATE = UP, DROP = DOWN)
-            float old_py = p_paddle_y;
             if (gpio_get_level(BTN_ROTATE) == 0 && p_paddle_y > 35.0f) {
                 p_paddle_y -= 7.0f;
                 if (p_paddle_y < 35.0f) p_paddle_y = 35.0f;
@@ -1415,25 +1419,12 @@ void app_main(void) {
                 if (p_paddle_y > 312 - p_paddle_h - 2) p_paddle_y = 312 - p_paddle_h - 2;
             }
 
-            if (old_py != p_paddle_y) {
-                st7789_fill_rect(10, (int)old_py, 6, p_paddle_h, COLOR_BLACK);
-                st7789_fill_rect(10, (int)p_paddle_y, 6, p_paddle_h, COLOR_GREEN);
-            }
-
             // Computer AI Paddle Tracking
-            float old_cy = c_paddle_y;
             float target_y = pong_by - (c_paddle_h / 2.0f);
             if (c_paddle_y < target_y - 4) c_paddle_y += 1.8f;
             else if (c_paddle_y > target_y + 4) c_paddle_y -= 1.8f;
-
             if (c_paddle_y < 35.0f) c_paddle_y = 35.0f;
             if (c_paddle_y > 312 - c_paddle_h - 2) c_paddle_y = 312 - c_paddle_h - 2;
-
-            if (old_cy != c_paddle_y) {
-                st7789_fill_rect(224, (int)old_cy, 6, c_paddle_h, COLOR_BLACK);
-                st7789_fill_rect(224, (int)c_paddle_y, 6, c_paddle_h, COLOR_CYAN);
-            }
-
 
             // Sub-step Physics Loop
             float old_bx = pong_bx;
@@ -1450,11 +1441,11 @@ void app_main(void) {
                 if (pong_by <= 36.0f) { pong_by = 36.0f; pong_vy = fabsf(pong_vy); step_vy = fabsf(step_vy); sfx_move(); }
                 if (pong_by >= 304.0f) { pong_by = 304.0f; pong_vy = -fabsf(pong_vy); step_vy = -fabsf(step_vy); sfx_move(); }
 
-                // Player Paddle Bounce (Left side X=10)
+                // Player Paddle Bounce
                 if (pong_vx < 0 && pong_bx <= 16.0f && pong_bx >= 8.0f &&
                     pong_by + 6.0f >= p_paddle_y && pong_by <= p_paddle_y + p_paddle_h) {
                     pong_bx = 16.0f;
-                    pong_vx = fabsf(pong_vx) + 0.12f; // Slightly accelerate
+                    pong_vx = fabsf(pong_vx) + 0.12f;
                     step_vx = pong_vx / (float)sub_steps;
                     float hit_offset = (pong_by + 3.0f) - (p_paddle_y + p_paddle_h / 2.0f);
                     pong_vy = hit_offset * 0.18f;
@@ -1462,7 +1453,7 @@ void app_main(void) {
                     sfx_rotate();
                 }
 
-                // Computer Paddle Bounce (Right side X=224)
+                // Computer Paddle Bounce
                 if (pong_vx > 0 && pong_bx + 6.0f >= 224.0f && pong_bx <= 232.0f &&
                     pong_by + 6.0f >= c_paddle_y && pong_by <= c_paddle_y + c_paddle_h) {
                     pong_bx = 218.0f;
@@ -1474,60 +1465,57 @@ void app_main(void) {
                     sfx_rotate();
                 }
 
-                // Point Scored: Computer Misses (Right) -> Player Point
+                // Point Scored: Computer Misses -> Player Point
                 if (pong_bx >= 236.0f) {
                     player_score++;
-                    sfx_line_clear();
-                    draw_retro_squarish_num(65, 45, player_score, COLOR_GREEN);
+                    sfx_rotate();
                     if (player_score >= 9) pong_game_over = true;
-                    else {
-                        pong_bx = 120; pong_by = 160;
-                        pong_vx = -2.4f; pong_vy = 1.2f;
-                    }
+                    else { pong_bx = 120; pong_by = 160; pong_vx = -2.4f; pong_vy = 1.2f; }
                     break;
                 }
 
-                // Point Scored: Player Misses (Left) -> Computer Point
+                // Point Scored: Player Misses -> Computer Point
                 if (pong_bx <= 4.0f) {
                     comp_score++;
                     sfx_hit();
-                    draw_retro_squarish_num(153, 45, comp_score, COLOR_CYAN);
                     if (comp_score >= 9) pong_game_over = true;
-                    else {
-                        pong_bx = 120; pong_by = 160;
-                        pong_vx = 2.4f; pong_vy = -1.2f;
-                    }
+                    else { pong_bx = 120; pong_by = 160; pong_vx = 2.4f; pong_vy = -1.2f; }
                     break;
                 }
             }
 
+            // --- FULL FRAME REDRAW INTO RAM BUFFER (zero ball trails) ---
+            st7789_fill_rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, COLOR_BLACK);
 
-            // Draw Anti-Aliased Sub-pixel Ball
-            draw_subpixel_ball(pong_bx, pong_by, old_bx, old_by);
-
-            // Automatic Score Digit Repair (Restores missing segments when ball passes near digits)
-            if (pong_by <= 85.0f) {
-                draw_retro_squarish_num(65, 45, player_score, COLOR_GREEN);
-                draw_retro_squarish_num(153, 45, comp_score, COLOR_CYAN);
-            }
-
-            // Re-render Paddles, Court Borders, and Dotted Net
-            st7789_fill_rect(10, (int)p_paddle_y, 6, p_paddle_h, COLOR_GREEN);
-            st7789_fill_rect(224, (int)c_paddle_y, 6, c_paddle_h, COLOR_CYAN);
-
-            // Re-assert top and bottom white border lines so paddle erases never clip them
+            // Court borders
             st7789_fill_rect(0, 32, SCREEN_WIDTH, 2, COLOR_WHITE);
-            st7789_fill_rect(0, 312, SCREEN_WIDTH, 2, COLOR_WHITE);
+            st7789_fill_rect(0, 314, SCREEN_WIDTH, 2, COLOR_WHITE);
 
-            for (int y = 40; y < 310; y += 16) {
+            // Dotted centre net
+            for (int y = 36; y < 314; y += 16) {
                 st7789_fill_rect(119, y, 2, 8, COLOR_DARKGRAY);
             }
+
+            // HUD: title left, scores right
+            draw_string(10, 10, "TENNIS", COLOR_WHITE, COLOR_BLACK, 2);
+            draw_retro_squarish_num(65, 45, player_score, COLOR_GREEN);
+            draw_retro_squarish_num(153, 45, comp_score, COLOR_CYAN);
+
+            // Paddles
+            st7789_fill_rect(10,  (int)p_paddle_y, 6, p_paddle_h, COLOR_GREEN);
+            st7789_fill_rect(224, (int)c_paddle_y, 6, c_paddle_h, COLOR_CYAN);
+
+            // Ball (solid white square — no trail possible with full redraw)
+            st7789_fill_rect((int)pong_bx, (int)pong_by, 6, 6, COLOR_WHITE);
+
+            // Push complete frame
+            fb_present();
 
             vTaskDelay(pdMS_TO_TICKS(15));
             continue;
         }
 
-        // --- STATE 5: SNAKE ---
+
         else if (current_game == STATE_SNAKE) {
             if (snake_game_over) {
                 draw_string(25, 140, "GAME OVER!", COLOR_RED, COLOR_BLACK, 2);
@@ -1587,6 +1575,8 @@ void app_main(void) {
             char buf[32];
             snprintf(buf, sizeof(buf), "SCORE:%04d", snake_score);
             draw_string(140, 10, buf, COLOR_WHITE, COLOR_BLACK, 1);
+
+            fb_present();
 
             vTaskDelay(pdMS_TO_TICKS(110));
             continue;
