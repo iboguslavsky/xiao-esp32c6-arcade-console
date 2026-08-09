@@ -1,0 +1,21 @@
+# PlatformIO build artifacts
+.pio/
+
+# ESP-IDF build artifacts
+build/
+sdkconfig
+sdkconfig.old
+
+# VSCode
+.vscode/
+
+# macOS
+.DS_Store
+
+# CLion
+.idea/
+cmake-build-*/
+
+# Python
+__pycache__/
+*.pyc
