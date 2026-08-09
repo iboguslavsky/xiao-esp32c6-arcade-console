@@ -792,8 +792,8 @@ static void draw_retro_squarish_num(int x, int y, int num, uint16_t color) {
 static void reset_pong_game(void) {
     p_paddle_y = 130; c_paddle_y = 130;
     pong_bx = 120; pong_by = 160;
-    pong_vx = (esp_random() % 2 == 0) ? 2.4f : -2.4f;
-    pong_vy = ((esp_random() % 100) / 70.0f) - 0.7f;
+    pong_vx = (esp_random() % 2 == 0) ? 4.8f : -4.8f;
+    pong_vy = ((esp_random() % 100) / 35.0f) - 1.4f;
     player_score = 0; comp_score = 0; pong_game_over = false;
 
     st7789_fill_rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, COLOR_BLACK);
@@ -1445,7 +1445,7 @@ void app_main(void) {
                 if (pong_vx < 0 && pong_bx <= 16.0f && pong_bx >= 8.0f &&
                     pong_by + 6.0f >= p_paddle_y && pong_by <= p_paddle_y + p_paddle_h) {
                     pong_bx = 16.0f;
-                    pong_vx = fabsf(pong_vx) + 0.12f;
+                    pong_vx = fabsf(pong_vx) + 0.24f;
                     step_vx = pong_vx / (float)sub_steps;
                     float hit_offset = (pong_by + 3.0f) - (p_paddle_y + p_paddle_h / 2.0f);
                     pong_vy = hit_offset * 0.18f;
@@ -1457,7 +1457,7 @@ void app_main(void) {
                 if (pong_vx > 0 && pong_bx + 6.0f >= 224.0f && pong_bx <= 232.0f &&
                     pong_by + 6.0f >= c_paddle_y && pong_by <= c_paddle_y + c_paddle_h) {
                     pong_bx = 218.0f;
-                    pong_vx = -fabsf(pong_vx) - 0.12f;
+                    pong_vx = -fabsf(pong_vx) - 0.24f;
                     step_vx = pong_vx / (float)sub_steps;
                     float hit_offset = (pong_by + 3.0f) - (c_paddle_y + c_paddle_h / 2.0f);
                     pong_vy = hit_offset * 0.18f;
@@ -1470,7 +1470,7 @@ void app_main(void) {
                     player_score++;
                     sfx_rotate();
                     if (player_score >= 9) pong_game_over = true;
-                    else { pong_bx = 120; pong_by = 160; pong_vx = -2.4f; pong_vy = 1.2f; }
+                    else { pong_bx = 120; pong_by = 160; pong_vx = -4.8f; pong_vy = 2.4f; }
                     break;
                 }
 
@@ -1479,7 +1479,7 @@ void app_main(void) {
                     comp_score++;
                     sfx_hit();
                     if (comp_score >= 9) pong_game_over = true;
-                    else { pong_bx = 120; pong_by = 160; pong_vx = 2.4f; pong_vy = -1.2f; }
+                    else { pong_bx = 120; pong_by = 160; pong_vx = 4.8f; pong_vy = -2.4f; }
                     break;
                 }
             }
