@@ -911,44 +911,44 @@ static void draw_racer_fpv_car(int x, int y, int tilt) {
 
 
 // ============================================================================
-// POWER MANAGEMENT - MOSFET-GATED TFT + FULL SPI PIN LOCKDOWN DURING SLEEP
+// POWER MANAGEMENT - MOSFET-GATED TFT DEEP SLEEP
 // ============================================================================
 static void enter_power_down_deep_sleep(void) {
+    sfx_powerdown();
+
     // 1. ST7789 software shutdown sequence
     st7789_cmd(0x28); // DISPOFF
     vTaskDelay(pdMS_TO_TICKS(50));
-    st7789_cmd(0x10); // SLPIN - internal rails begin discharging
+    st7789_cmd(0x10); // SLPIN
     vTaskDelay(pdMS_TO_TICKS(120));
 
-    // 2. Cut TFT power via MOSFET (D7 LOW)
-    //    This eliminates ALL backfeed paths - no VCC rail = no ESD diode leakage
+    // 2. Kill TFT power via MOSFET (D7 LOW).
+    //    With VCC cut, there is NO backfeed path - no need to touch SPI pins.
     gpio_set_level(PIN_TFT_PWR, 0);
-    vTaskDelay(pdMS_TO_TICKS(20)); // Let TFT capacitors fully discharge
+    vTaskDelay(pdMS_TO_TICKS(10));
+    gpio_hold_en((gpio_num_t)PIN_TFT_PWR); // Hold MOSFET off during sleep
 
-    // 3. Free SPI bus so we can take ownership of MOSI/CLK/CS pins as plain GPIO
-    spi_bus_remove_device(spi);
-    spi_bus_free(SPI2_HOST);
+    // 3. Hold RST LOW as belt-and-suspenders (ST7789 in hardware reset)
+    gpio_set_level(PIN_NUM_RST, 0);
+    gpio_hold_en((gpio_num_t)PIN_NUM_RST);
 
-    // 4. Reconfigure ALL display signal pins as GPIO outputs, drive LOW, then hold
-    //    Order: MOSI, CLK, CS, DC, RST
-    const gpio_num_t display_pins[] = {
-        PIN_NUM_MOSI, PIN_NUM_CLK, PIN_NUM_CS, PIN_NUM_DC, PIN_NUM_RST
-    };
-    for (int i = 0; i < 5; i++) {
-        gpio_reset_pin(display_pins[i]);          // Release from SPI peripheral mux
-        gpio_set_direction(display_pins[i], GPIO_MODE_OUTPUT);
-        gpio_set_level(display_pins[i], 0);       // Drive LOW
-        gpio_hold_en(display_pins[i]);            // Latch LOW through deep sleep
+    // 4. Ensure LP-domain pull-ups on wakeup buttons survive deep sleep
+    gpio_pullup_en((gpio_num_t)BTN_RIGHT);
+    gpio_pullup_en((gpio_num_t)BTN_LEFT);
+    gpio_pullup_en((gpio_num_t)BTN_ROTATE);
+
+    // 5. Wait for DROP to be released, then wait for ALL wakeup buttons to be
+    //    clearly HIGH. Wakeup is level-triggered LOW — any LOW pin at sleep
+    //    entry causes an immediate spurious wakeup.
+    while (gpio_get_level(BTN_DROP)   == 0) vTaskDelay(pdMS_TO_TICKS(20));
+    while (gpio_get_level(BTN_RIGHT)  == 0 ||
+           gpio_get_level(BTN_LEFT)   == 0 ||
+           gpio_get_level(BTN_ROTATE) == 0) {
+        vTaskDelay(pdMS_TO_TICKS(20));
     }
+    vTaskDelay(pdMS_TO_TICKS(500)); // Extra debounce — hand fully away
 
-    // 5. Also hold TFT power pin LOW (belt-and-suspenders: MOSFET off + pin locked)
-    gpio_hold_en((gpio_num_t)PIN_TFT_PWR);
-
-    // 6. Wait for DROP button release, then deep sleep
-    while (gpio_get_level(BTN_DROP) == 0) vTaskDelay(pdMS_TO_TICKS(20));
-    vTaskDelay(pdMS_TO_TICKS(100));
-
-    // Wakeup on any button press (RIGHT=GPIO0, LEFT=GPIO1, ROTATE=GPIO2)
+    // 6. Arm wakeup on any button press and enter deep sleep
     uint64_t mask = (1ULL << BTN_RIGHT) | (1ULL << BTN_LEFT) | (1ULL << BTN_ROTATE);
     esp_deep_sleep_enable_gpio_wakeup(mask, ESP_GPIO_WAKEUP_GPIO_LOW);
     esp_deep_sleep_start();
@@ -999,15 +999,9 @@ static void draw_arcade_menu(void) {
 void app_main(void) {
     ESP_LOGI(TAG, "Starting XIAO Arcade Console...");
 
-    // Release all display pin holds from previous deep sleep
-    // (MOSI, CLK, CS, DC, RST were all held LOW; TFT_PWR was held LOW)
-    const gpio_num_t held_pins[] = {
-        PIN_TFT_PWR, PIN_NUM_RST, PIN_NUM_DC,
-        PIN_NUM_CS, PIN_NUM_MOSI, PIN_NUM_CLK
-    };
-    for (int i = 0; i < 6; i++) {
-        gpio_hold_dis(held_pins[i]);
-    }
+    // Release pin holds set during previous deep sleep (TFT_PWR + RST)
+    gpio_hold_dis((gpio_num_t)PIN_TFT_PWR);
+    gpio_hold_dis((gpio_num_t)PIN_NUM_RST);
 
     // Configure button inputs with pull-ups
     gpio_config_t btn_config = {
