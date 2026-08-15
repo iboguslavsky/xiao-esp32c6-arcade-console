@@ -398,6 +398,63 @@ static void draw_string(uint16_t x, uint16_t y, const char *str, uint16_t color,
     }
 }
 
+static void draw_centered_string(uint16_t y, const char *str, uint16_t color, uint16_t bg, uint8_t scale) {
+    int len = strlen(str);
+    int width = len * 6 * scale;
+    int x = (SCREEN_WIDTH - width) / 2;
+    if (x < 0) x = 0;
+    draw_string(x, y, str, color, bg, scale);
+}
+
+// Modern Retro Arcade Modal Dialog for Game Over / Victory / Crashes
+static void draw_game_over_modal(const char *title, uint32_t score, int level, uint16_t accent_color) {
+    int mw = 210;
+    int mh = 140;
+    int mx = (SCREEN_WIDTH - mw) / 2; // 15
+    int my = (SCREEN_HEIGHT - mh) / 2; // 90
+
+    // 3D Drop Shadow
+    st7789_fill_rect(mx + 6, my + 6, mw, mh, 0x1082); // Dark Charcoal shadow
+
+    // Outer Box Fill & Double Border Frame
+    st7789_fill_rect(mx, my, mw, mh, COLOR_BLACK);
+    st7789_fill_rect(mx, my, mw, 3, accent_color);
+    st7789_fill_rect(mx, my + mh - 3, mw, 3, accent_color);
+    st7789_fill_rect(mx, my, 3, mh, accent_color);
+    st7789_fill_rect(mx + mw - 3, my, 3, mh, accent_color);
+
+    // Inner Fine Border Line
+    st7789_fill_rect(mx + 5, my + 5, mw - 10, 1, accent_color);
+    st7789_fill_rect(mx + 5, my + mh - 6, mw - 10, 1, accent_color);
+    st7789_fill_rect(mx + 5, my + 5, 1, mh - 10, accent_color);
+    st7789_fill_rect(mx + mw - 6, my + 5, 1, mh - 10, accent_color);
+
+    // Header Title (Centered)
+    draw_centered_string(my + 15, title, accent_color, COLOR_BLACK, 2);
+
+    // Divider Line
+    st7789_fill_rect(mx + 15, my + 42, mw - 30, 2, accent_color);
+
+    // Score Info
+    if (score > 0) {
+        char score_str[32];
+        snprintf(score_str, sizeof(score_str), "SCORE: %05lu", (unsigned long)score);
+        draw_centered_string(my + 54, score_str, COLOR_WHITE, COLOR_BLACK, 1);
+    }
+
+    if (level > 0) {
+        char lvl_str[32];
+        snprintf(lvl_str, sizeof(lvl_str), "REACHED STAGE %d", level);
+        draw_centered_string(my + 72, lvl_str, COLOR_YELLOW, COLOR_BLACK, 1);
+    }
+
+    // Action Prompt Box (Bottom of Modal)
+    st7789_fill_rect(mx + 20, my + mh - 32, mw - 40, 20, 0x2104); // Dark accent box
+    draw_centered_string(my + mh - 26, "PRESS ROTATE", COLOR_GREEN, 0x2104, 1);
+
+    fb_present();
+}
+
 // ============================================================================
 // GAME 1: TETRIS
 // ============================================================================
@@ -1252,8 +1309,7 @@ void app_main(void) {
         // --- STATE 1: TETRIS ---
         if (current_game == STATE_TETRIS) {
             if (t_game_over) {
-                draw_string(15, 130, "GAME OVER!", COLOR_RED, COLOR_BLACK, 2);
-                draw_string(15, 160, "PRESS ROTATE", COLOR_WHITE, COLOR_BLACK, 1);
+                draw_game_over_modal("GAME OVER!", t_score, t_level, COLOR_RED);
                 sfx_game_over();
                 while (gpio_get_level(BTN_ROTATE) != 0) vTaskDelay(pdMS_TO_TICKS(50));
                 vTaskDelay(pdMS_TO_TICKS(200)); reset_tetris_game();
@@ -1298,9 +1354,7 @@ void app_main(void) {
         // --- STATE 2: SPACE INVADERS (60 FPS DOUBLE BUFFERED ZERO-FLICKER) ---
         else if (current_game == STATE_INVADERS) {
             if (inv_game_over) {
-                draw_string(25, 140, "GAME OVER!", COLOR_RED, COLOR_BLACK, 2);
-                draw_string(25, 170, "PRESS ROTATE", COLOR_WHITE, COLOR_BLACK, 1);
-                fb_present();
+                draw_game_over_modal("GAME OVER!", inv_score, inv_level, COLOR_RED);
                 sfx_game_over();
                 while (gpio_get_level(BTN_ROTATE) != 0) vTaskDelay(pdMS_TO_TICKS(50));
                 vTaskDelay(pdMS_TO_TICKS(200)); reset_space_invaders(); continue;
@@ -1476,9 +1530,7 @@ void app_main(void) {
         // --- STATE 3: BREAKOUT (60 FPS DOUBLE BUFFERED ZERO-FLICKER) ---
         else if (current_game == STATE_BREAKOUT) {
             if (brk_game_over) {
-                draw_string(25, 140, "GAME OVER!", COLOR_RED, COLOR_BLACK, 2);
-                draw_string(25, 170, "PRESS ROTATE", COLOR_WHITE, COLOR_BLACK, 1);
-                fb_present();
+                draw_game_over_modal("GAME OVER!", brk_score, brk_level, COLOR_RED);
                 sfx_game_over();
                 while (gpio_get_level(BTN_ROTATE) != 0) vTaskDelay(pdMS_TO_TICKS(50));
                 vTaskDelay(pdMS_TO_TICKS(200)); reset_breakout(); continue;
@@ -1647,10 +1699,8 @@ void app_main(void) {
         // --- STATE 4: PONG / TENNIS (60 FPS DOUBLE BUFFERED ZERO-FLICKER) ---
         else if (current_game == STATE_PONG) {
             if (pong_game_over) {
-                if (player_score >= 9) draw_string(25, 140, "YOU WIN!", COLOR_GREEN, COLOR_BLACK, 2);
-                else draw_string(25, 140, "COMP WINS!", COLOR_RED, COLOR_BLACK, 2);
-                draw_string(25, 170, "PRESS ROTATE", COLOR_WHITE, COLOR_BLACK, 1);
-                fb_present();
+                if (player_score >= 9) draw_game_over_modal("YOU WIN!", player_score, 0, COLOR_GREEN);
+                else draw_game_over_modal("COMP WINS!", comp_score, 0, COLOR_RED);
                 sfx_game_over();
                 while (gpio_get_level(BTN_ROTATE) != 0) vTaskDelay(pdMS_TO_TICKS(50));
                 vTaskDelay(pdMS_TO_TICKS(200)); reset_pong_game(); continue;
@@ -1796,8 +1846,7 @@ void app_main(void) {
 
         else if (current_game == STATE_SNAKE) {
             if (snake_game_over) {
-                draw_string(25, 140, "GAME OVER!", COLOR_RED, COLOR_BLACK, 2);
-                draw_string(25, 170, "PRESS ROTATE", COLOR_WHITE, COLOR_BLACK, 1);
+                draw_game_over_modal("GAME OVER!", snake_score, 0, COLOR_RED);
                 sfx_game_over();
                 while (gpio_get_level(BTN_ROTATE) != 0) vTaskDelay(pdMS_TO_TICKS(50));
                 vTaskDelay(pdMS_TO_TICKS(200)); reset_snake_game(); continue;
@@ -1863,9 +1912,7 @@ void app_main(void) {
         // --- STATE 6: FLAPPY BIRD (BALANCED ARCHITECTURE) ---
         else if (current_game == STATE_FLAPPY) {
             if (flappy_game_over) {
-                draw_string(25, 140, "GAME OVER!", COLOR_RED, COLOR_BLACK, 2);
-                draw_string(25, 170, "PRESS ROTATE", COLOR_WHITE, COLOR_BLACK, 1);
-                fb_present();
+                draw_game_over_modal("GAME OVER!", flappy_score, flappy_level, COLOR_RED);
                 sfx_game_over();
                 while (gpio_get_level(BTN_ROTATE) != 0) vTaskDelay(pdMS_TO_TICKS(50));
                 vTaskDelay(pdMS_TO_TICKS(200)); reset_flappy_game(); continue;
@@ -1944,11 +1991,8 @@ void app_main(void) {
 
         // --- STATE 7: PSEUDO-3D ARCADE RACER ---
         else if (current_game == STATE_RACER) {
-
             if (racer_game_over) {
-                draw_string(25, 140, "CRASHED!", COLOR_RED, COLOR_BLACK, 2);
-                draw_string(25, 170, "PRESS ROTATE", COLOR_WHITE, COLOR_BLACK, 1);
-                fb_present();
+                draw_game_over_modal("CRASHED!", racer_score, 0, COLOR_RED);
                 sfx_game_over();
                 while (gpio_get_level(BTN_ROTATE) != 0) vTaskDelay(pdMS_TO_TICKS(50));
                 vTaskDelay(pdMS_TO_TICKS(200)); reset_racer_game(); continue;
