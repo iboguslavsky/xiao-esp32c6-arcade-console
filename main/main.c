@@ -918,18 +918,19 @@ static void reset_snake_game(void) {
 }
 
 // ============================================================================
-// GAME 6: FLAPPY BIRD
+// GAME 6: FLAPPY BIRD (BALANCED & ACCESSIBLE ENGINE)
 // ============================================================================
 static float flappy_y = 150.0f, flappy_vy = 0.0f;
-static float pipe_x[2] = {240, 380};
-static int pipe_gap_y[2] = {120, 160};
+static float pipe_x[2] = {240, 410};
+static int pipe_gap_y[2] = {100, 140};
 static int flappy_score = 0;
+static int flappy_level = 1;
 static bool flappy_game_over = false;
 
 static void reset_flappy_game(void) {
-    flappy_y = 150.0f; flappy_vy = 0.0f; flappy_score = 0; flappy_game_over = false;
-    pipe_x[0] = 240; pipe_gap_y[0] = (esp_random() % 120) + 70;
-    pipe_x[1] = 380; pipe_gap_y[1] = (esp_random() % 120) + 70;
+    flappy_y = 150.0f; flappy_vy = 0.0f; flappy_score = 0; flappy_level = 1; flappy_game_over = false;
+    pipe_x[0] = 240; pipe_gap_y[0] = (esp_random() % 100) + 65;
+    pipe_x[1] = 410; pipe_gap_y[1] = (esp_random() % 100) + 65;
     st7789_fill_rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, COLOR_BLACK);
     st7789_fill_rect(0, 32, SCREEN_WIDTH, 2, COLOR_YELLOW);
     draw_string(20, 10, "FLAPPY BIRD", COLOR_YELLOW, COLOR_BLACK, 2);
@@ -1859,7 +1860,7 @@ void app_main(void) {
             continue;
         }
 
-        // --- STATE 6: FLAPPY BIRD (60 FPS DOUBLE BUFFERED ZERO-FLICKER) ---
+        // --- STATE 6: FLAPPY BIRD (BALANCED ARCHITECTURE) ---
         else if (current_game == STATE_FLAPPY) {
             if (flappy_game_over) {
                 draw_string(25, 140, "GAME OVER!", COLOR_RED, COLOR_BLACK, 2);
@@ -1872,26 +1873,34 @@ void app_main(void) {
 
             // Clear RAM Framebuffer for 100% flicker-free rendering
             st7789_fill_rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, COLOR_BLACK);
-            draw_string(20, 10, "FLAPPY BIRD", COLOR_YELLOW, COLOR_BLACK, 2);
-            st7789_fill_rect(0, 32, SCREEN_WIDTH, 2, COLOR_YELLOW);
 
-            // Flap Impulse
+            // Level & Gap scaling
+            flappy_level = 1 + (flappy_score / 5);
+            int gap_h = 95 - (flappy_level - 1) * 3;
+            if (gap_h < 75) gap_h = 75; // Minimum 75px gap
+
+            float pipe_speed = 2.2f + (flappy_level - 1) * 0.15f;
+            if (pipe_speed > 3.2f) pipe_speed = 3.2f;
+
+            // Flap Impulse (Smooth & responsive)
             if (ev.rotate_short_click || ev.drop_short_click) {
-                flappy_vy = -5.5f;
+                flappy_vy = -4.2f;
                 sfx_shoot();
             }
 
-            flappy_vy += 0.42f; // Gravity
+            flappy_vy += 0.28f; // Gentle Gravity
             flappy_y += flappy_vy;
 
+            // Ceiling & Ground Boundary Collisions
             if (flappy_y < 35 || flappy_y > 300) flappy_game_over = true;
 
             // Scroll Pipes
             for (int p = 0; p < 2; p++) {
-                pipe_x[p] -= 3.0f;
+                pipe_x[p] -= pipe_speed;
+
                 if (pipe_x[p] < -30) {
-                    pipe_x[p] = 240;
-                    pipe_gap_y[p] = (esp_random() % 120) + 70;
+                    pipe_x[p] = 310;
+                    pipe_gap_y[p] = (esp_random() % (250 - gap_h - 60)) + 55;
                     flappy_score++;
                     sfx_line_clear();
                 }
@@ -1902,12 +1911,12 @@ void app_main(void) {
                     int pw = 26;
                     if (px < 0) { pw += px; px = 0; }
                     st7789_fill_rect(px, 35, pw, pipe_gap_y[p] - 35, COLOR_GREEN);
-                    st7789_fill_rect(px, pipe_gap_y[p] + 70, pw, 315 - (pipe_gap_y[p] + 70), COLOR_GREEN);
+                    st7789_fill_rect(px, pipe_gap_y[p] + gap_h, pw, 315 - (pipe_gap_y[p] + gap_h), COLOR_GREEN);
                 }
 
-                // Collision check with Bird (X=50..66)
-                if (pipe_x[p] <= 66 && pipe_x[p] + 26 >= 50) {
-                    if (flappy_y < pipe_gap_y[p] || flappy_y + 12 > pipe_gap_y[p] + 70) {
+                // Forgiving Collision check with Bird (Bird X=50..66, Y=flappy_y+2 .. flappy_y+10)
+                if (pipe_x[p] <= 64 && pipe_x[p] + 26 >= 52) {
+                    if (flappy_y + 2.0f < (float)pipe_gap_y[p] || (flappy_y + 10.0f) > (float)(pipe_gap_y[p] + gap_h)) {
                         flappy_game_over = true;
                     }
                 }
@@ -1916,10 +1925,14 @@ void app_main(void) {
             // Draw Bird into RAM
             st7789_fill_rect(50, (int)flappy_y, 16, 12, COLOR_YELLOW);
             st7789_fill_rect(60, (int)flappy_y + 3, 4, 4, COLOR_WHITE); // Eye
+            st7789_fill_rect(64, (int)flappy_y + 6, 4, 3, COLOR_ORANGE); // Beak
 
+            // Header & Clean HUD
+            draw_string(10, 10, "FLAPPY", COLOR_YELLOW, COLOR_BLACK, 2);
             char buf[32];
-            snprintf(buf, sizeof(buf), "SCORE:%04d", flappy_score);
-            draw_string(140, 10, buf, COLOR_WHITE, COLOR_BLACK, 1);
+            snprintf(buf, sizeof(buf), "SCR:%04d LVL:%d", flappy_score, flappy_level);
+            draw_string(110, 12, buf, COLOR_WHITE, COLOR_BLACK, 1);
+            st7789_fill_rect(0, 32, SCREEN_WIDTH, 2, COLOR_YELLOW);
 
             // Push complete frame atomically over 40MHz SPI DMA
             fb_present();

@@ -47,7 +47,7 @@
 | LEFT | Move left | Move left | Paddle left | — | Turn left | — | Steer left | — |
 | RIGHT | Move right | Move right | Paddle right | — | Turn right | — | Steer right | — |
 | ROTATE short | Rotate | Shoot | Speed +0.25x | Paddle up | Turn up | Flap | TURBO (135 MPH) + Flames | Scroll up |
-| DROP short | Hard drop | — | Speed -0.25x | Paddle down | Turn down | — | BRAKE (30 MPH) | Scroll down |
+| DROP short | Hard drop | — | Speed -0.25x | Paddle down | Turn down | Flap | BRAKE (30 MPH) | Scroll down |
 | ROTATE long | — | — | — | — | — | — | — | Launch game |
 | DROP long (1s) | Power off | Power off | Power off | Power off | Power off | Power off | Power off | Power off |
 | LEFT / RIGHT | — | — | — | Speed -/+0.25x | — | — | — | Select game |
@@ -90,14 +90,15 @@
 | 3 | Breakout | **Levels 1..10+** | 10 unique layouts (Rainbow, Checkerboard, Pyramid, Silver 2-Hit, Fortress, Stripes, Ring Vault, Low Wall, Staggered, Omega Vault). Level clear banner + bonus life |
 | 4 | Tennis (Pong) | Speed control (0.5x–4.0x) | Sub-step physics; LEFT/RIGHT = speed; 7-seg score |
 | 5 | Snake | Grid-based | Speed increases as snake grows |
-| 6 | Flappy Bird | Distance score | Pipe obstacles |
-| 7 | **Retro Racer** | **Full 3D OutRun-style Arcade Engine** | Dynamic curves, 3D scaling traffic (Cars, Trucks), Oil Slicks (spinout), Gold Bonus Stars (+500pts), Off-road grass physics, Turbo Flames (135 MPH), 3-life system |
+| 6 | Flappy Bird | **Balanced Controls & Level Progression** | 95px initial pipe gap (scales to 75px), 170px pipe spacing, gentle gravity (0.28), smooth flap (-4.2), 2px collision margin, LVL:X in HUD |
+| 7 | Retro Racer | Full 3D OutRun-style Arcade Engine | Dynamic curves, 3D scaling traffic (Cars, Trucks), Oil Slicks (spinout), Gold Bonus Stars (+500pts), Off-road grass physics, Turbo Flames (135 MPH), 3-life system |
 
 ---
 
 ## Git History
 
 ```
+ec6d3bf  Rework Racer into full 3D OutRun-style arcade racer
 c209d48  Update CONTEXT.md with multi-level progression details
 547f968  Add 10+ multi-level progression for Breakout & Space Invaders
 8111087  Add CONTEXT.md project documentation & deep sleep wakeup fix
