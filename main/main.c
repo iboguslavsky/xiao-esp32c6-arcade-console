@@ -632,22 +632,40 @@ static int e_bullet_x = -1, e_bullet_y = -1;
 static uint32_t inv_score = 0;
 static int inv_lives = 3;
 static bool inv_game_over = false;
+static int inv_level = 1;
 
-static void reset_space_invaders(void) {
-    inv_score = 0; inv_lives = 3; inv_game_over = false; inv_dir = 1; ship_x = 105;
+static void setup_space_invaders_wave(int level) {
+    inv_dir = 1; ship_x = 105;
     p_bullet_x = -1; p_bullet_y = -1; e_bullet_x = -1; e_bullet_y = -1;
+
+    // Aliens start lower on screen each wave (up to 24px lower)
+    int start_y = 44 + ((level - 1) % 4) * 6;
 
     for (int r = 0; r < INV_ROWS; r++) {
         for (int c = 0; c < INV_COLS; c++) {
             int idx = r * INV_COLS + c;
             invaders[idx].x = 12 + c * 35;
-            invaders[idx].y = 48 + r * 24;
+            invaders[idx].y = start_y + r * 24;
             invaders[idx].alive = true;
-            if (r == 0) { invaders[idx].color = COLOR_CYAN; invaders[idx].bmp = ALIEN_SQUID; }
-            else if (r < 3) { invaders[idx].color = COLOR_GREEN; invaders[idx].bmp = ALIEN_CRAB; }
-            else { invaders[idx].color = COLOR_YELLOW; invaders[idx].bmp = ALIEN_JELLY; }
+
+            // Vary colors & types on higher levels
+            if (r == 0) {
+                invaders[idx].color = (level >= 5) ? COLOR_MAGENTA : COLOR_CYAN;
+                invaders[idx].bmp = ALIEN_SQUID;
+            } else if (r < 3) {
+                invaders[idx].color = (level % 2 == 0) ? COLOR_ORANGE : COLOR_GREEN;
+                invaders[idx].bmp = ALIEN_CRAB;
+            } else {
+                invaders[idx].color = COLOR_YELLOW;
+                invaders[idx].bmp = ALIEN_JELLY;
+            }
         }
     }
+}
+
+static void reset_space_invaders(void) {
+    inv_score = 0; inv_lives = 3; inv_game_over = false; inv_level = 1;
+    setup_space_invaders_wave(1);
     st7789_fill_rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, COLOR_BLACK);
     draw_string(10, 10, "SPACE INVADERS", COLOR_GREEN, COLOR_BLACK, 2);
     st7789_fill_rect(0, 32, SCREEN_WIDTH, 2, COLOR_GREEN);
@@ -655,7 +673,7 @@ static void reset_space_invaders(void) {
 
 static void render_space_invaders(void) {
     char buf[32];
-    snprintf(buf, sizeof(buf), "SCORE:%04lu  LIVES:%d", (unsigned long)inv_score, inv_lives);
+    snprintf(buf, sizeof(buf), "SCR:%04lu W:%d L:%d", (unsigned long)inv_score, inv_level, inv_lives);
     draw_string(10, 35, buf, COLOR_WHITE, COLOR_BLACK, 1);
 
     // Draw Pixel Art Invaders (double-size 16x16)
@@ -683,6 +701,7 @@ typedef struct {
     int x, y, w, h;
     bool alive;
     uint16_t color;
+    int hits_left; // 1 = normal, 2 = silver 2-hit brick
 } Brick;
 
 static Brick bricks[BRK_COUNT];
@@ -692,15 +711,28 @@ static uint32_t brk_score = 0;
 static int brk_lives = 3;
 static bool brk_game_over = false;
 static float brk_speed_mult = 1.0f; // ROTATE=faster, DROP=slower
+static int brk_level = 1;
 
-static void reset_breakout(void) {
-    brk_score = 0; brk_lives = 3; brk_game_over = false;
+static void setup_breakout_level(int level) {
     ball_x = 120; ball_y = 200;
-    ball_vx = 4.5f * brk_speed_mult;
-    ball_vy = -5.0f * brk_speed_mult;
-    paddle_x = 96;
 
-    static const uint16_t row_colors[5] = { COLOR_RED, COLOR_ORANGE, COLOR_YELLOW, COLOR_GREEN, COLOR_CYAN };
+    // Speed scales slightly with level progression
+    float lvl_speed = 1.0f + (level - 1) * 0.08f;
+    if (lvl_speed > 1.8f) lvl_speed = 1.8f;
+    ball_vx = 4.5f * brk_speed_mult * lvl_speed;
+    ball_vy = -5.0f * brk_speed_mult * lvl_speed;
+
+    // Paddle narrows slightly on higher levels (min 28px)
+    paddle_w = 48 - (level - 1) * 2;
+    if (paddle_w < 28) paddle_w = 28;
+    paddle_x = (SCREEN_WIDTH - paddle_w) / 2;
+
+    static const uint16_t row_colors[6] = {
+        COLOR_RED, COLOR_ORANGE, COLOR_YELLOW, COLOR_GREEN, COLOR_CYAN, COLOR_MAGENTA
+    };
+
+    int layout = (level - 1) % 10; // 10 distinct level layouts
+
     for (int r = 0; r < BRK_ROWS; r++) {
         for (int c = 0; c < BRK_COLS; c++) {
             int idx = r * BRK_COLS + c;
@@ -709,19 +741,63 @@ static void reset_breakout(void) {
             bricks[idx].w = 30;
             bricks[idx].h = 10;
             bricks[idx].alive = true;
-            bricks[idx].color = row_colors[r];
+            bricks[idx].color = row_colors[r % 6];
+            bricks[idx].hits_left = 1;
+
+            switch (layout) {
+                case 0: // Level 1: Standard 5-row Rainbow
+                    break;
+
+                case 1: // Level 2: Checkerboard
+                    if ((r + c) % 2 != 0) bricks[idx].alive = false;
+                    break;
+
+                case 2: // Level 3: Pyramid / Diamond
+                    if (c < (2 - r / 2) || c > (4 + r / 2)) bricks[idx].alive = false;
+                    break;
+
+                case 3: // Level 4: Silver 2-Hit Top Row
+                    if (r == 0) { bricks[idx].color = COLOR_WHITE; bricks[idx].hits_left = 2; }
+                    break;
+
+                case 4: // Level 5: Alien Invader Pattern
+                    if ((r == 0 && (c == 0 || c == 6)) || (r == 4 && c % 2 == 1)) bricks[idx].alive = false;
+                    if (r == 1 || r == 2) bricks[idx].color = COLOR_CYAN;
+                    break;
+
+                case 5: // Level 6: Vertical Stripes
+                    bricks[idx].color = row_colors[c % 6];
+                    break;
+
+                case 6: // Level 7: Ring Vault (center hollow, Silver core)
+                    if (r >= 1 && r <= 3 && c >= 2 && c <= 4) {
+                        if (r == 2 && c == 3) { bricks[idx].color = COLOR_WHITE; bricks[idx].hits_left = 2; }
+                        else bricks[idx].alive = false;
+                    }
+                    break;
+
+                case 7: // Level 8: Low Wall (starts at Y=70)
+                    bricks[idx].y = 70 + r * 14;
+                    break;
+
+                case 8: // Level 9: Staggered Columns
+                    if ((c % 2 == 1 && r == 0) || (c % 2 == 0 && r == 4)) bricks[idx].alive = false;
+                    break;
+
+                case 9: // Level 10: THE OMEGA VAULT (Silver 2-hit top 2 rows)
+                    if (r <= 1) { bricks[idx].color = COLOR_WHITE; bricks[idx].hits_left = 2; }
+                    break;
+            }
         }
     }
+}
+
+static void reset_breakout(void) {
+    brk_score = 0; brk_lives = 3; brk_game_over = false; brk_level = 1;
+    setup_breakout_level(1);
     st7789_fill_rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, COLOR_BLACK);
     draw_string(25, 10, "BREAKOUT", COLOR_ORANGE, COLOR_BLACK, 2);
     st7789_fill_rect(0, 32, SCREEN_WIDTH, 2, COLOR_ORANGE);
-
-    // Draw all 35 colorful bricks on game start
-    for (int i = 0; i < BRK_COUNT; i++) {
-        if (bricks[i].alive) {
-            st7789_fill_rect(bricks[i].x, bricks[i].y, bricks[i].w, bricks[i].h, bricks[i].color);
-        }
-    }
 }
 
 
@@ -1238,8 +1314,10 @@ void app_main(void) {
                 }
             }
 
-            // Enemy Missile Firing
-            if (e_bullet_y < 0 && (esp_random() % 15 == 0)) {
+            // Enemy Missile Firing (frequency increases with wave level)
+            int fire_chance = 16 - inv_level * 2;
+            if (fire_chance < 4) fire_chance = 4;
+            if (e_bullet_y < 0 && (esp_random() % fire_chance == 0)) {
                 int col = esp_random() % INV_COLS;
                 for (int r = INV_ROWS - 1; r >= 0; r--) {
                     int idx = r * INV_COLS + col;
@@ -1266,9 +1344,12 @@ void app_main(void) {
                 }
             }
 
-            // Move Invader Matrix
+            // Move Invader Matrix (speed increases with wave level)
+            int move_threshold = 6 - (inv_level - 1) / 2;
+            if (move_threshold < 1) move_threshold = 1;
+
             static int move_timer = 0;
-            if (++move_timer >= 6) {
+            if (++move_timer >= move_threshold) {
                 move_timer = 0;
                 bool hit_wall = false;
                 for (int i = 0; i < INV_COUNT; i++) {
@@ -1287,6 +1368,32 @@ void app_main(void) {
                 } else {
                     for (int i = 0; i < INV_COUNT; i++) invaders[i].x += inv_dir * 4;
                 }
+            }
+
+            // Victory Check: All Invaders Destroyed -> Advance Wave!
+            bool inv_any_alive = false;
+            for (int i = 0; i < INV_COUNT; i++) {
+                if (invaders[i].alive) { inv_any_alive = true; break; }
+            }
+            if (!inv_any_alive) {
+                inv_score += 500 * inv_level;
+                if (inv_lives < 5) inv_lives++;
+
+                // Wave Clear Banner
+                st7789_fill_rect(15, 120, 210, 75, COLOR_DARKGRAY);
+                st7789_fill_rect(17, 122, 206, 71, COLOR_BLACK);
+                char win_buf[32];
+                snprintf(win_buf, sizeof(win_buf), "WAVE %d CLEARED!", inv_level);
+                draw_string(25, 135, win_buf, COLOR_YELLOW, COLOR_BLACK, 2);
+                snprintf(win_buf, sizeof(win_buf), "+%d PTS  L:%d", 500 * inv_level, inv_lives);
+                draw_string(30, 165, win_buf, COLOR_GREEN, COLOR_BLACK, 1);
+                fb_present();
+                sfx_line_clear();
+                vTaskDelay(pdMS_TO_TICKS(1500));
+
+                inv_level++;
+                setup_space_invaders_wave(inv_level);
+                continue;
             }
 
             // Draw Pixel Art Invaders into RAM
@@ -1320,14 +1427,14 @@ void app_main(void) {
             // Header & Clean Non-Overlapping HUD
             draw_string(10, 10, "BREAKOUT", COLOR_CYAN, COLOR_BLACK, 2);
             char brk_buf[32];
-            snprintf(brk_buf, sizeof(brk_buf), "SCR:%04lu L:%d", (unsigned long)brk_score, brk_lives);
-            draw_string(135, 12, brk_buf, COLOR_WHITE, COLOR_BLACK, 1);
+            snprintf(brk_buf, sizeof(brk_buf), "S:%04lu L:%d LVL:%d", (unsigned long)brk_score, brk_lives, brk_level);
+            draw_string(115, 12, brk_buf, COLOR_WHITE, COLOR_BLACK, 1);
             // Speed indicator (right side)
             char brk_spd[10];
             int bs_int = (int)(brk_speed_mult * 10.0f + 0.5f);
             if (bs_int % 10 == 0) snprintf(brk_spd, sizeof(brk_spd), "x%d", bs_int / 10);
             else snprintf(brk_spd, sizeof(brk_spd), "x%.2g", brk_speed_mult);
-            draw_string(205, 12, brk_spd, COLOR_YELLOW, COLOR_BLACK, 1);
+            draw_string(212, 12, brk_spd, COLOR_YELLOW, COLOR_BLACK, 1);
             st7789_fill_rect(0, 32, SCREEN_WIDTH, 2, COLOR_CYAN);
 
             // ROTATE short = faster, DROP short = slower (immediate effect)
@@ -1367,10 +1474,26 @@ void app_main(void) {
                 }
             }
 
-            // Victory check: All bricks destroyed -> Reset bricks!
+            // Victory Check: All Bricks Destroyed -> Advance Level!
             if (!any_alive) {
+                brk_score += 1000 * brk_level;
+                if (brk_lives < 5) brk_lives++;
+
+                // Level Clear Banner
+                st7789_fill_rect(15, 120, 210, 75, COLOR_DARKGRAY);
+                st7789_fill_rect(17, 122, 206, 71, COLOR_BLACK);
+                char win_buf[32];
+                snprintf(win_buf, sizeof(win_buf), "LEVEL %d CLEARED!", brk_level);
+                draw_string(25, 135, win_buf, COLOR_YELLOW, COLOR_BLACK, 2);
+                snprintf(win_buf, sizeof(win_buf), "+%d PTS  L:%d", 1000 * brk_level, brk_lives);
+                draw_string(30, 165, win_buf, COLOR_GREEN, COLOR_BLACK, 1);
+                fb_present();
                 sfx_line_clear();
-                reset_breakout();
+                vTaskDelay(pdMS_TO_TICKS(1500));
+
+                brk_level++;
+                setup_breakout_level(brk_level);
+                continue;
             }
 
             // Sub-step Physics Loop
@@ -1401,16 +1524,23 @@ void app_main(void) {
                     sfx_rotate();
                 }
 
-                // Brick Collisions
+                // Brick Collisions (Handles 2-Hit Silver Bricks)
                 for (int i = 0; i < BRK_COUNT; i++) {
                     if (bricks[i].alive) {
                         if (ball_x + 6.0f >= (float)bricks[i].x && ball_x <= (float)(bricks[i].x + bricks[i].w) &&
                             ball_y + 6.0f >= (float)bricks[i].y && ball_y <= (float)(bricks[i].y + bricks[i].h)) {
-                            bricks[i].alive = false;
+                            if (bricks[i].hits_left > 1) {
+                                bricks[i].hits_left--;
+                                static const uint16_t row_colors[6] = { COLOR_RED, COLOR_ORANGE, COLOR_YELLOW, COLOR_GREEN, COLOR_CYAN, COLOR_MAGENTA };
+                                bricks[i].color = row_colors[i / BRK_COLS % 6];
+                                sfx_rotate();
+                            } else {
+                                bricks[i].alive = false;
+                                brk_score += 20 * brk_level;
+                                sfx_rotate();
+                            }
                             ball_vy = -ball_vy;
                             step_vy = -step_vy;
-                            brk_score += 20;
-                            sfx_rotate(); // Short single beep - no freeze!
                             break;
                         }
                     }
@@ -1425,8 +1555,10 @@ void app_main(void) {
                     } else {
                         ball_x = paddle_x + paddle_w / 2 - 3;
                         ball_y = 200.0f;
-                        ball_vx = (esp_random() % 2 == 0) ? 4.5f : -4.5f;
-                        ball_vy = -5.0f;
+                        float lvl_speed = 1.0f + (brk_level - 1) * 0.08f;
+                        if (lvl_speed > 1.8f) lvl_speed = 1.8f;
+                        ball_vx = ((esp_random() % 2 == 0) ? 4.5f : -4.5f) * brk_speed_mult * lvl_speed;
+                        ball_vy = -5.0f * brk_speed_mult * lvl_speed;
                     }
                     break;
                 }
