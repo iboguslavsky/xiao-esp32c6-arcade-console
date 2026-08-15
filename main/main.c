@@ -938,33 +938,62 @@ static void reset_flappy_game(void) {
 // ============================================================================
 // GAME 7: RETRO RACING / HIGHWAY DODGER
 // ============================================================================
-static int player_lane = 1; // 0=Left, 1=Center, 2=Right
-static float enemy_y[2] = {-60, -180};
-static int enemy_lane[2] = {0, 2};
+// GAME 7: ARCADE RACER (OUTRUN-STYLE PSEUDO-3D ENGINE)
+// ============================================================================
+#define RACER_MAX_TRAFFIC 4
+
+typedef struct {
+    float z;          // Perspective depth (0.05 = horizon, 1.0 = player level)
+    int lane;         // -1 = Left, 0 = Center, 1 = Right
+    uint16_t color;   // Car color
+    float speed_mod;  // Relative traffic speed (0.3 to 0.7)
+    int type;         // 0 = Car, 1 = Truck, 2 = Oil Slick, 3 = Gold Star
+    bool active;
+} TrafficObj;
+
+static TrafficObj traffic[RACER_MAX_TRAFFIC];
 static uint32_t racer_score = 0;
+static int racer_cars_passed = 0;
+static int racer_lives = 3;
 static bool racer_game_over = false;
+static float player_x = 0.0f;        // -1.0 (Left curb) to +1.0 (Right curb)
+static float racer_speed_mph = 0.0f; // 0 to 140 MPH
+static float track_pos = 0.0f;       // Track distance
+static int spinout_timer = 0;        // Oil slick spinout counter
 
 static void reset_racer_game(void) {
-    player_lane = 1; racer_score = 0; racer_game_over = false;
-    enemy_y[0] = -50; enemy_lane[0] = esp_random() % 3;
-    enemy_y[1] = -190; enemy_lane[1] = esp_random() % 3;
+    player_x = 0.0f; racer_score = 0; racer_cars_passed = 0;
+    racer_lives = 3; racer_game_over = false; racer_speed_mph = 0.0f;
+    track_pos = 0.0f; spinout_timer = 0;
+
+    static const uint16_t traffic_cols[4] = { COLOR_YELLOW, COLOR_CYAN, COLOR_ORANGE, COLOR_WHITE };
+
+    for (int i = 0; i < RACER_MAX_TRAFFIC; i++) {
+        traffic[i].active = true;
+        traffic[i].z = 0.15f + i * 0.22f;
+        traffic[i].lane = (i % 3) - 1;
+        traffic[i].color = traffic_cols[i % 4];
+        traffic[i].speed_mod = 0.35f + (esp_random() % 25) / 100.0f;
+        traffic[i].type = (i == 3) ? 3 : ((i == 2) ? 2 : (i % 2)); // 0=Car, 1=Truck, 2=Oil, 3=Star
+    }
+
     st7789_fill_rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, COLOR_BLACK);
-    st7789_fill_rect(0, 32, SCREEN_WIDTH, 2, COLOR_CYAN);
     draw_string(15, 10, "RETRO RACER", COLOR_CYAN, COLOR_BLACK, 2);
+    st7789_fill_rect(0, 32, SCREEN_WIDTH, 2, COLOR_CYAN);
 }
 
-// Detailed Pixel Art FPV / Rear Supercar Sprite (32x24 px)
-static void draw_racer_fpv_car(int x, int y, int tilt) {
-    // Slicks / Wide Tires
-    st7789_fill_rect(x - 2, y + 10, 6, 12, COLOR_DARKGRAY);
-    st7789_fill_rect(x + 28, y + 10, 6, 12, COLOR_DARKGRAY);
+// Draw Detailed Player FPV Sports Car (32x24 px) with Turbo Flames & Steering Tilt
+static void draw_racer_player_car(int x, int y, int tilt, bool turbo) {
+    // Slicks / Wide Rear Tires
+    st7789_fill_rect(x - 3, y + 10, 6, 12, COLOR_DARKGRAY);
+    st7789_fill_rect(x + 29, y + 10, 6, 12, COLOR_DARKGRAY);
 
     // Main Red Sports Body
     st7789_fill_rect(x + 4, y + 4, 24, 16, COLOR_RED);
     st7789_fill_rect(x + 2, y + 12, 28, 8, COLOR_RED);
 
-    // Rear Windshield
-    st7789_fill_rect(x + 8, y + 6, 16, 6, COLOR_BLUE);
+    // Rear Windshield (Cyan glass)
+    st7789_fill_rect(x + 8, y + 6, 16, 6, COLOR_CYAN);
 
     // Rear Spoiler
     st7789_fill_rect(x + 1, y, 30, 3, COLOR_RED);
@@ -975,14 +1004,47 @@ static void draw_racer_fpv_car(int x, int y, int tilt) {
     st7789_fill_rect(x + 4, y + 14, 6, 3, COLOR_YELLOW);
     st7789_fill_rect(x + 22, y + 14, 6, 3, COLOR_YELLOW);
 
-    // Exhaust & Plate
+    // Exhaust & License Plate
     st7789_fill_rect(x + 12, y + 16, 8, 3, COLOR_DARKGRAY);
-    st7789_fill_rect(x + 6, y + 18, 4, 2, COLOR_WHITE);
-    st7789_fill_rect(x + 22, y + 18, 4, 2, COLOR_WHITE);
 
-    // Steering Bank Tilt indicator
+    // Steering Bank Tilt Indicator Lights
     if (tilt < 0) st7789_fill_rect(x + 2, y + 18, 4, 4, COLOR_YELLOW);
     else if (tilt > 0) st7789_fill_rect(x + 26, y + 18, 4, 4, COLOR_YELLOW);
+
+    // Turbo Exhaust Flames!
+    if (turbo) {
+        st7789_fill_rect(x + 5, y + 19, 5, 5, COLOR_ORANGE);
+        st7789_fill_rect(x + 6, y + 23, 3, 4, COLOR_YELLOW);
+        st7789_fill_rect(x + 22, y + 19, 5, 5, COLOR_ORANGE);
+        st7789_fill_rect(x + 23, y + 23, 3, 4, COLOR_YELLOW);
+    }
+}
+
+// Draw Perspective-Scaled Traffic Car / Truck / Oil Slick / Bonus Star
+static void draw_scaled_traffic_obj(int center_x, int screen_y, float z, uint16_t color, int type) {
+    int w = (int)(6.0f + z * 28.0f);
+    int h = (int)(4.0f + z * 16.0f);
+    if (w < 4) w = 4;
+    if (h < 3) h = 3;
+    int x = center_x - w / 2;
+
+    if (type == 0) { // Traffic Car
+        st7789_fill_rect(x, screen_y, w, h, color);
+        st7789_fill_rect(x + w / 4, screen_y + h / 4, w / 2, h / 3, COLOR_BLUE);
+        st7789_fill_rect(x + 1, screen_y + h - 2, (w / 4 > 2 ? w / 4 : 2), 2, COLOR_RED);
+        st7789_fill_rect(x + w - (w / 4 > 2 ? w / 4 : 2) - 1, screen_y + h - 2, (w / 4 > 2 ? w / 4 : 2), 2, COLOR_RED);
+    } else if (type == 1) { // Semi Truck
+        int truck_h = h + (int)(z * 8.0f);
+        st7789_fill_rect(x, screen_y - (int)(z * 4.0f), w, truck_h, COLOR_WHITE);
+        st7789_fill_rect(x + 2, screen_y, w - 4, h / 2, COLOR_DARKGRAY);
+        st7789_fill_rect(x + 1, screen_y + truck_h - 2, w - 2, 2, COLOR_RED);
+    } else if (type == 2) { // Oil Slick
+        st7789_fill_rect(x, screen_y, w + 4, h / 2 + 2, COLOR_DARKGRAY);
+        st7789_fill_rect(x + 2, screen_y + 1, w, h / 2, COLOR_BLACK);
+    } else if (type == 3) { // Bonus Gold Star
+        st7789_fill_rect(x + w / 4, screen_y, w / 2 + 1, h + 2, COLOR_YELLOW);
+        st7789_fill_rect(x, screen_y + h / 4, w + 2, h / 2 + 1, COLOR_ORANGE);
+    }
 }
 
 
@@ -1867,63 +1929,95 @@ void app_main(void) {
         }
 
 
-        // --- STATE 7: PSEUDO-3D FPV ARCADE RACER ---
+        // --- STATE 7: PSEUDO-3D ARCADE RACER ---
         else if (current_game == STATE_RACER) {
 
             if (racer_game_over) {
                 draw_string(25, 140, "CRASHED!", COLOR_RED, COLOR_BLACK, 2);
                 draw_string(25, 170, "PRESS ROTATE", COLOR_WHITE, COLOR_BLACK, 1);
+                fb_present();
                 sfx_game_over();
                 while (gpio_get_level(BTN_ROTATE) != 0) vTaskDelay(pdMS_TO_TICKS(50));
                 vTaskDelay(pdMS_TO_TICKS(200)); reset_racer_game(); continue;
             }
 
-            // Controls: Steering & Turbo Boost
-            static float p_x_pos = 0.0f; // -1.0 (Left) to +1.0 (Right)
+            // --- CONTROLS & SPEED PHYSICS ---
             int tilt = 0;
-            if (ev.left_pressed) { p_x_pos -= 0.12f; tilt = -1; }
-            if (ev.right_pressed) { p_x_pos += 0.12f; tilt = 1; }
-            if (p_x_pos < -1.2f) p_x_pos = -1.2f;
-            if (p_x_pos > 1.2f) p_x_pos = 1.2f;
+            bool turbo = false;
 
-            float speed = 1.0f;
-            if (gpio_get_level(BTN_ROTATE) == 0) speed = 2.0f; // Turbo boost!
-            else if (gpio_get_level(BTN_DROP) == 0) speed = 0.4f; // Brake
+            // Handle Spinout timer (if hit oil slick)
+            if (spinout_timer > 0) {
+                spinout_timer--;
+                tilt = (spinout_timer % 2 == 0) ? -1 : 1;
+                player_x += (tilt < 0) ? -0.1f : 0.1f;
+                racer_speed_mph -= 3.0f;
+                if (racer_speed_mph < 20.0f) racer_speed_mph = 20.0f;
+            } else {
+                // Steering
+                if (ev.left_pressed) { player_x -= 0.08f; tilt = -1; }
+                if (ev.right_pressed) { player_x += 0.08f; tilt = 1; }
+            }
 
-            racer_score += (uint32_t)(speed * 3.0f);
+            // Clamp player road position (-1.2 to +1.2)
+            if (player_x < -1.25f) player_x = -1.25f;
+            if (player_x > 1.25f) player_x = 1.25f;
 
-            static float road_z = 0.0f;
-            road_z += speed * 0.18f;
+            // Off-Road (Grass) Check -> Slow down & rumble!
+            bool off_road = (fabsf(player_x) > 0.85f);
+            float target_speed = 75.0f;
 
-            // Clear Sky & Render Horizon Backdrop (Y = 0..80)
-            st7789_fill_rect(0, 35, SCREEN_WIDTH, 45, COLOR_PURPLE);
+            if (gpio_get_level(BTN_ROTATE) == 0) { // ROTATE = TURBO BOOST
+                target_speed = 135.0f;
+                turbo = true;
+            } else if (gpio_get_level(BTN_DROP) == 0) { // DROP = BRAKE
+                target_speed = 30.0f;
+            }
+
+            if (off_road) {
+                if (target_speed > 35.0f) target_speed = 35.0f; // Off-road speed cap
+                sfx_move(); // Rumble sound
+            }
+
+            // Smooth speed acceleration/deceleration
+            if (racer_speed_mph < target_speed) racer_speed_mph += 2.5f;
+            else if (racer_speed_mph > target_speed) racer_speed_mph -= 3.0f;
+
+            track_pos += (racer_speed_mph / 60.0f);
+            racer_score += (uint32_t)(racer_speed_mph * 0.1f);
+
+            // --- FULL FRAME CLEAR & RENDER INTO RAM BUFFER ---
+            st7789_fill_rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, COLOR_BLACK);
+
+            // Horizon & Sky Backdrop (Y = 0..75)
+            st7789_fill_rect(0, 32, SCREEN_WIDTH, 43, COLOR_PURPLE);
             st7789_fill_rect(0, 75, SCREEN_WIDTH, 5, COLOR_ORANGE);
 
-            // Sun & Horizon Mountain Peaks
-            st7789_fill_rect(105, 50, 30, 25, COLOR_YELLOW);
+            // Sun & Mountain Peaks
+            st7789_fill_rect(105, 48, 30, 27, COLOR_YELLOW);
             for (int mx = 0; mx < 240; mx += 30) {
                 st7789_fill_rect(mx, 70, 15, 10, COLOR_DARKGRAY);
             }
 
-            // Render Pseudo-3D Perspective Road Scanlines (Y = 80..320)
-            float curve = sinf(road_z * 0.3f) * 45.0f;
+            // Dynamic Road Curvature (Left turns, Right turns, Straightaways)
+            float curve = sinf(track_pos * 0.12f) * 55.0f + cosf(track_pos * 0.04f) * 25.0f;
 
-            for (int y = 80; y < 310; y += 8) {
-                float perspective = (float)(y - 80) / 230.0f;
-                float half_w = 14.0f + perspective * 96.0f;
-                float center_x = 120.0f + (curve * perspective) - (p_x_pos * perspective * 75.0f);
+            // Render Pseudo-3D Perspective Road Scanlines (Y = 80..315)
+            for (int y = 80; y < 312; y += 8) {
+                float perspective = (float)(y - 80) / 232.0f;
+                float half_w = 12.0f + perspective * 98.0f;
+                float center_x = 120.0f + (curve * perspective) - (player_x * perspective * 70.0f);
 
                 int lx = (int)(center_x - half_w);
                 int rx = (int)(center_x + half_w);
 
-                // Alternating Grass Color (Green / Dark Green)
-                bool stripe = (((int)(road_z * 4.0f + y / 16)) % 2 == 0);
+                // Alternating Grass & Curb Stripes
+                bool stripe = (((int)(track_pos * 3.0f + y / 16)) % 2 == 0);
                 uint16_t grass_col = stripe ? COLOR_GREEN : 0x03E0;
                 uint16_t curb_col  = stripe ? COLOR_RED : COLOR_WHITE;
 
                 // Draw Left & Right Grass
-                if (lx > 0) st7789_fill_rect(0, y, lx, 8, grass_col);
-                if (rx < 240) st7789_fill_rect(rx, y, 240 - rx, 8, grass_col);
+                if (lx > 0) st7789_fill_rect(0, y, (lx > 240 ? 240 : lx), 8, grass_col);
+                if (rx < 240) st7789_fill_rect((rx < 0 ? 0 : rx), y, 240 - rx, 8, grass_col);
 
                 // Draw Asphalt Road
                 if (lx < 240 && rx > 0) {
@@ -1935,53 +2029,91 @@ void app_main(void) {
                     st7789_fill_rect(r_start, y, 4, 8, curb_col);
                     st7789_fill_rect(r_end - 4, y, 4, 8, curb_col);
 
-                    // Dashed Center Lane Marker
+                    // Dashed White Lane Dividers
                     if (stripe && perspective > 0.2f) {
-                        st7789_fill_rect((int)center_x - 1, y, (int)(2.0f * perspective) + 1, 8, COLOR_WHITE);
+                        float lane_w = half_w * 0.65f;
+                        st7789_fill_rect((int)(center_x - lane_w / 2) - 1, y, 2, 8, COLOR_WHITE);
+                        st7789_fill_rect((int)(center_x + lane_w / 2) - 1, y, 2, 8, COLOR_WHITE);
                     }
                 }
             }
 
-            // Update & Render 3D Scaling Enemy Cars
-            for (int e = 0; e < 2; e++) {
-                enemy_y[e] += speed * 0.04f;
-                if (enemy_y[e] > 1.0f) {
-                    enemy_y[e] = 0.05f;
-                    enemy_lane[e] = (esp_random() % 3) - 1; // -1, 0, +1
+            // --- TRAFFIC & OBSTACLE PHYSICS & RENDERING ---
+            for (int i = 0; i < RACER_MAX_TRAFFIC; i++) {
+                if (!traffic[i].active) continue;
+
+                // Traffic Z movement relative to player speed
+                float rel_speed = (racer_speed_mph / 75.0f) - traffic[i].speed_mod;
+                traffic[i].z += rel_speed * 0.022f;
+
+                // Respawn traffic when passed (Z > 1.1) or fallen behind (Z < 0.03)
+                if (traffic[i].z > 1.15f) {
+                    racer_cars_passed++;
+                    racer_score += 150;
+                    sfx_rotate();
+                    traffic[i].z = 0.08f;
+                    traffic[i].lane = (esp_random() % 3) - 1; // -1, 0, +1
+                    traffic[i].type = (esp_random() % 4 == 0) ? 3 : ((esp_random() % 5 == 0) ? 2 : (esp_random() % 2));
+                } else if (traffic[i].z < 0.02f) {
+                    traffic[i].z = 0.95f;
+                    traffic[i].lane = (esp_random() % 3) - 1;
                 }
 
-                float e_perspective = enemy_y[e];
-                int e_screen_y = 80 + (int)(e_perspective * 220.0f);
+                // Render traffic on screen if in view (Z = 0.08 .. 1.0)
+                if (traffic[i].z >= 0.08f && traffic[i].z <= 1.0f) {
+                    float p = traffic[i].z;
+                    int s_y = 80 + (int)(p * 220.0f);
 
-                if (e_screen_y >= 80 && e_screen_y <= 300) {
-                    float e_half_w = 14.0f + e_perspective * 96.0f;
-                    float e_center_x = 120.0f + (curve * e_perspective) - (p_x_pos * e_perspective * 75.0f);
-                    int e_x = (int)(e_center_x + enemy_lane[e] * (e_half_w * 0.65f));
+                    float half_w = 12.0f + p * 98.0f;
+                    float center_x = 120.0f + (curve * p) - (player_x * p * 70.0f);
+                    int obj_x = (int)(center_x + traffic[i].lane * (half_w * 0.65f));
 
-                    int w = (int)(6.0f + e_perspective * 24.0f);
-                    int h = (int)(4.0f + e_perspective * 16.0f);
+                    draw_scaled_traffic_obj(obj_x, s_y, p, traffic[i].color, traffic[i].type);
 
-                    st7789_fill_rect(e_x - w / 2, e_screen_y, w, h, COLOR_CYAN);
-                    st7789_fill_rect(e_x - w / 4, e_screen_y + h / 4, w / 2, h / 2, COLOR_WHITE);
+                    // --- COLLISION DETECTION (Player near Z = 0.82 .. 1.0) ---
+                    if (p >= 0.78f && p <= 0.98f) {
+                        int player_screen_x = 104 + (int)(player_x * 40.0f);
+                        if (abs(obj_x - (player_screen_x + 16)) < 24) {
 
-                    // Collision check near player (screen Y=250..290)
-                    if (e_screen_y >= 250 && e_screen_y <= 290) {
-                        int player_screen_x = 104;
-                        if (abs((e_x - w / 2) - player_screen_x) < 22) {
-                            racer_game_over = true;
-                            sfx_hit();
+                            if (traffic[i].type == 3) { // Gold Bonus Star!
+                                racer_score += 500;
+                                sfx_line_clear();
+                                traffic[i].z = 0.08f; // Collect!
+                            } else if (traffic[i].type == 2) { // Oil Slick!
+                                if (spinout_timer == 0) {
+                                    spinout_timer = 18;
+                                    sfx_hit();
+                                }
+                            } else { // Traffic Car / Truck Collision -> CRASH!
+                                sfx_game_over();
+                                racer_lives--;
+                                racer_speed_mph = 15.0f;
+                                traffic[i].z = 0.08f; // Clear traffic item
+                                if (racer_lives <= 0) {
+                                    racer_game_over = true;
+                                }
+                            }
                         }
                     }
                 }
             }
 
-            // Draw Detailed FPV / Rear Supercar at bottom center
-            draw_racer_fpv_car(104, 265, tilt);
+            // Draw Player Supercar at bottom (screen X depends on steering position)
+            int p_screen_x = 104 + (int)(player_x * 40.0f);
+            if (p_screen_x < 10) p_screen_x = 10;
+            if (p_screen_x > 198) p_screen_x = 198;
+            draw_racer_player_car(p_screen_x, 265, tilt, turbo);
 
-            // Draw HUD
-            char buf[32];
-            snprintf(buf, sizeof(buf), "SPD:%03d MPH  DIST:%05lu", (int)(speed * 75), (unsigned long)racer_score);
-            draw_string(10, 10, buf, COLOR_WHITE, COLOR_BLACK, 1);
+            // Clean Non-Overlapping HUD
+            char racer_hud[40];
+            snprintf(racer_hud, sizeof(racer_hud), "%03dMPH L:%d PASS:%d", (int)racer_speed_mph, racer_lives, racer_cars_passed);
+            draw_string(10, 10, racer_hud, turbo ? COLOR_YELLOW : COLOR_WHITE, COLOR_BLACK, 1);
+
+            char score_buf[20];
+            snprintf(score_buf, sizeof(score_buf), "S:%05lu", (unsigned long)racer_score);
+            draw_string(170, 10, score_buf, COLOR_CYAN, COLOR_BLACK, 1);
+
+            st7789_fill_rect(0, 24, SCREEN_WIDTH, 2, COLOR_CYAN);
 
             // Push complete frame atomically over 40MHz SPI DMA
             fb_present();

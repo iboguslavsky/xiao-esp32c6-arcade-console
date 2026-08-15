@@ -42,15 +42,15 @@
 
 ## Button Controls Per Game
 
-| Button | Tetris | Invaders | Breakout | Tennis | Snake | Flappy | Menu |
-|--------|--------|----------|----------|--------|-------|--------|------|
-| LEFT | Move left | Move left | Paddle left | — | Turn left | — | — |
-| RIGHT | Move right | Move right | Paddle right | — | Turn right | — | — |
-| ROTATE short | Rotate | Shoot | Speed +0.25x | Paddle up | Turn up | Flap | Scroll up |
-| DROP short | Hard drop | — | Speed -0.25x | Paddle down | Turn down | — | Scroll down |
-| ROTATE long | — | — | — | — | — | — | Launch game |
-| DROP long (1s) | Power off | Power off | Power off | Power off | Power off | Power off | Power off |
-| LEFT / RIGHT | — | — | — | Speed -/+0.25x | — | — | Select game |
+| Button | Tetris | Invaders | Breakout | Tennis | Snake | Flappy | Racer | Menu |
+|--------|--------|----------|----------|--------|-------|--------|-------|------|
+| LEFT | Move left | Move left | Paddle left | — | Turn left | — | Steer left | — |
+| RIGHT | Move right | Move right | Paddle right | — | Turn right | — | Steer right | — |
+| ROTATE short | Rotate | Shoot | Speed +0.25x | Paddle up | Turn up | Flap | TURBO (135 MPH) + Flames | Scroll up |
+| DROP short | Hard drop | — | Speed -0.25x | Paddle down | Turn down | — | BRAKE (30 MPH) | Scroll down |
+| ROTATE long | — | — | — | — | — | — | — | Launch game |
+| DROP long (1s) | Power off | Power off | Power off | Power off | Power off | Power off | Power off | Power off |
+| LEFT / RIGHT | — | — | — | Speed -/+0.25x | — | — | — | Select game |
 
 ---
 
@@ -79,33 +79,26 @@
 - gpio_hold_dis(PIN_TFT_PWR) + gpio_hold_dis(PIN_NUM_RST)
 - D7 HIGH -> MOSFET powers TFT -> 150ms rail stabilization -> SPI init -> ST7789 init -> menu
 
-### Hard-Won Lessons (DO NOT repeat these mistakes)
-- DO NOT call spi_bus_free() or gpio_reset_pin() on SPI pins before sleep — corrupts LP wakeup subsystem
-- DO NOT gpio_hold_en(DC pin) — SPI peripheral needs DC; holding it causes SPI to hang on wakeup
-- ESP_GPIO_WAKEUP_GPIO_LOW is LEVEL-triggered — all wakeup pins must be clearly HIGH before
-  esp_deep_sleep_start() or it wakes immediately (spurious wakeup on button release)
-- ESP32-C6 LP GPIOs are GPIO0-7 only — BTN_DROP (GPIO16) cannot be a wakeup source
-- gpio_pullup_en() must be called explicitly before sleep — LP domain pull-ups don't auto-persist
-
 ---
 
-## Games & Multi-Level Systems
+## Games & Progression
 
-| # | Game | Levels / Progression | Notes |
+| # | Game | Features & Mechanics | Notes |
 |---|------|----------------------|-------|
 | 1 | Tetris | Speed scales with score | Full rotation, wall kicks |
 | 2 | Space Invaders | **Waves 1..10+** | Aliens start lower, move faster, fire aggressively. Wave clear banner + bonus life |
-| 3 | Breakout | **Levels 1..10+** | 10 unique brick layouts (Rainbow, Checkerboard, Pyramid, Silver 2-Hit, Fortress, Stripes, Ring Vault, Low Wall, Staggered, Omega Vault). Level clear banner + bonus life |
+| 3 | Breakout | **Levels 1..10+** | 10 unique layouts (Rainbow, Checkerboard, Pyramid, Silver 2-Hit, Fortress, Stripes, Ring Vault, Low Wall, Staggered, Omega Vault). Level clear banner + bonus life |
 | 4 | Tennis (Pong) | Speed control (0.5x–4.0x) | Sub-step physics; LEFT/RIGHT = speed; 7-seg score |
 | 5 | Snake | Grid-based | Speed increases as snake grows |
 | 6 | Flappy Bird | Distance score | Pipe obstacles |
-| 7 | Racer | WIP / placeholder | Moving background, FPV |
+| 7 | **Retro Racer** | **Full 3D OutRun-style Arcade Engine** | Dynamic curves, 3D scaling traffic (Cars, Trucks), Oil Slicks (spinout), Gold Bonus Stars (+500pts), Off-road grass physics, Turbo Flames (135 MPH), 3-life system |
 
 ---
 
 ## Git History
 
 ```
+c209d48  Update CONTEXT.md with multi-level progression details
 547f968  Add 10+ multi-level progression for Breakout & Space Invaders
 8111087  Add CONTEXT.md project documentation & deep sleep wakeup fix
 dc53037  Add TFT MOSFET power control (D7/GPIO17) + buzzer on D5/GPIO23
@@ -116,28 +109,13 @@ f9689dc  Fix all games: full-frame double-buffering across all 7 games
 
 ---
 
-## Toolchain / Build
-
-- PlatformIO: `pio run` / `pio run -t upload`
-- Framework: ESP-IDF 5.5.4
-- Compiler: riscv32-esp-elf-gcc 14.2.0+20260121
-
----
-
-## Outstanding Work
-
-1. Racer rework — moving background, race car sprites, FPV perspective (requested, not started)
-2. ZX Spectrum emulator — feasibility discussion only, not started
-
----
-
 ## File Structure
 
 ```
 xiao_esp32c6_tetris/
 ├── CONTEXT.md          <- this file
 ├── main/
-│   └── main.c          <- ALL code: games + display driver + power mgmt (~1950 lines)
+│   └── main.c          <- ALL code: games + display driver + power mgmt (~2000 lines)
 ├── platformio.ini
 └── sdkconfig.defaults
 ```
