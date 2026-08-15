@@ -26,13 +26,14 @@ static const char *TAG = "ARCADE";
 #define PIN_NUM_DC      GPIO_NUM_19 // D8  (DC)
 #define PIN_NUM_RST     GPIO_NUM_18 // D10 (RST)
 // #define PIN_NUM_BCKL GPIO_NUM_23  // No backlight pin on this board
+#define PIN_BUZZER      GPIO_NUM_23 // D5 (Piezo buzzer - LEDC PWM)
 
 #define BTN_RIGHT       GPIO_NUM_0  // D0
 #define BTN_LEFT        GPIO_NUM_1  // D1
 #define BTN_ROTATE      GPIO_NUM_2  // D2
 #define BTN_DROP        GPIO_NUM_16 // D6
 
-#define PIN_BUZZER      GPIO_NUM_17 // D7
+#define PIN_TFT_PWR     GPIO_NUM_17 // D7 - MOSFET gate: HIGH=TFT power ON, LOW=TFT power OFF
 
 // ============================================================================
 // DISPLAY CONFIGURATION
@@ -133,7 +134,7 @@ static ButtonEvents get_button_events(void) {
 }
 
 // ============================================================================
-// AUDIO / BUZZER DRIVER (LEDC PWM)
+// AUDIO / BUZZER DRIVER (LEDC PWM on D5 / GPIO23)
 // ============================================================================
 #define LEDC_TIMER              LEDC_TIMER_0
 #define LEDC_MODE               LEDC_LOW_SPEED_MODE
@@ -289,6 +290,8 @@ static void draw_bitmap(int x, int y, int w, int h, const uint8_t *bmp, uint16_t
 static void st7789_init(void) {
     init_framebuffer();
 
+    // TFT power is already ON (PIN_TFT_PWR driven HIGH in app_main before we get here)
+    // Just assert hardware reset to ensure a clean ST7789 startup state
     gpio_set_level(PIN_NUM_RST, 0);
     vTaskDelay(pdMS_TO_TICKS(50));
     gpio_set_level(PIN_NUM_RST, 1);
@@ -303,7 +306,6 @@ static void st7789_init(void) {
     st7789_cmd(0x13); vTaskDelay(pdMS_TO_TICKS(10));
     st7789_cmd(0x29); vTaskDelay(pdMS_TO_TICKS(100));
 
-    // No backlight pin on this board - display always on
     st7789_fill_rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, COLOR_BLACK);
     fb_present();
 }
@@ -689,10 +691,14 @@ static int paddle_x = 96, paddle_w = 48;
 static uint32_t brk_score = 0;
 static int brk_lives = 3;
 static bool brk_game_over = false;
+static float brk_speed_mult = 1.0f; // ROTATE=faster, DROP=slower
 
 static void reset_breakout(void) {
     brk_score = 0; brk_lives = 3; brk_game_over = false;
-    ball_x = 120; ball_y = 200; ball_vx = 4.5f; ball_vy = -5.0f; paddle_x = 96;
+    ball_x = 120; ball_y = 200;
+    ball_vx = 4.5f * brk_speed_mult;
+    ball_vy = -5.0f * brk_speed_mult;
+    paddle_x = 96;
 
     static const uint16_t row_colors[5] = { COLOR_RED, COLOR_ORANGE, COLOR_YELLOW, COLOR_GREEN, COLOR_CYAN };
     for (int r = 0; r < BRK_ROWS; r++) {
@@ -759,6 +765,7 @@ static int p_paddle_h = 44, c_paddle_h = 44;
 static float pong_bx = 120, pong_by = 160, pong_vx = 2.4f, pong_vy = 1.5f;
 static int player_score = 0, comp_score = 0;
 static bool pong_game_over = false;
+static float pong_speed_mult = 1.0f; // Adjustable with LEFT/RIGHT buttons
 
 // Draw super-fat 1970s arcade Pong digital score number (22x32 px, 5px thick segments)
 static void draw_retro_squarish_num(int x, int y, int num, uint16_t color) {
@@ -792,8 +799,8 @@ static void draw_retro_squarish_num(int x, int y, int num, uint16_t color) {
 static void reset_pong_game(void) {
     p_paddle_y = 130; c_paddle_y = 130;
     pong_bx = 120; pong_by = 160;
-    pong_vx = (esp_random() % 2 == 0) ? 4.8f : -4.8f;
-    pong_vy = ((esp_random() % 100) / 35.0f) - 1.4f;
+    pong_vx = (esp_random() % 2 == 0) ? 4.8f * pong_speed_mult : -4.8f * pong_speed_mult;
+    pong_vy = (((esp_random() % 100) / 35.0f) - 1.4f) * pong_speed_mult;
     player_score = 0; comp_score = 0; pong_game_over = false;
 
     st7789_fill_rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, COLOR_BLACK);
@@ -904,30 +911,44 @@ static void draw_racer_fpv_car(int x, int y, int tilt) {
 
 
 // ============================================================================
-// POWER MANAGEMENT & HARDWARE LOCKED DEEP SLEEP (0% GLOW)
+// POWER MANAGEMENT - MOSFET-GATED TFT + FULL SPI PIN LOCKDOWN DURING SLEEP
 // ============================================================================
 static void enter_power_down_deep_sleep(void) {
-    sfx_powerdown();
-
-    // 1. ST7789 Software Power-Down Sequence
-    st7789_cmd(0x28); // DISPOFF - turn off display
+    // 1. ST7789 software shutdown sequence
+    st7789_cmd(0x28); // DISPOFF
     vTaskDelay(pdMS_TO_TICKS(50));
-    st7789_cmd(0x10); // SLPIN - LCD controller sleep mode
-    vTaskDelay(pdMS_TO_TICKS(120)); // 120ms for internal rails to discharge
+    st7789_cmd(0x10); // SLPIN - internal rails begin discharging
+    vTaskDelay(pdMS_TO_TICKS(120));
 
-    // 2. Assert RST LOW = ST7789 hardware reset (disables all internal LCD circuits)
-    //    DO NOT hold DC - it is driven by the SPI peripheral on every transaction
-    gpio_set_level(PIN_NUM_RST, 0);
-    vTaskDelay(pdMS_TO_TICKS(20));
+    // 2. Cut TFT power via MOSFET (D7 LOW)
+    //    This eliminates ALL backfeed paths - no VCC rail = no ESD diode leakage
+    gpio_set_level(PIN_TFT_PWR, 0);
+    vTaskDelay(pdMS_TO_TICKS(20)); // Let TFT capacitors fully discharge
 
-    // 3. Lock RST at 0V for entire deep sleep - ST7789 init will re-assert on wakeup
-    gpio_hold_en((gpio_num_t)PIN_NUM_RST);
+    // 3. Free SPI bus so we can take ownership of MOSI/CLK/CS pins as plain GPIO
+    spi_bus_remove_device(spi);
+    spi_bus_free(SPI2_HOST);
 
-    // Wait for any held button to be released
+    // 4. Reconfigure ALL display signal pins as GPIO outputs, drive LOW, then hold
+    //    Order: MOSI, CLK, CS, DC, RST
+    const gpio_num_t display_pins[] = {
+        PIN_NUM_MOSI, PIN_NUM_CLK, PIN_NUM_CS, PIN_NUM_DC, PIN_NUM_RST
+    };
+    for (int i = 0; i < 5; i++) {
+        gpio_reset_pin(display_pins[i]);          // Release from SPI peripheral mux
+        gpio_set_direction(display_pins[i], GPIO_MODE_OUTPUT);
+        gpio_set_level(display_pins[i], 0);       // Drive LOW
+        gpio_hold_en(display_pins[i]);            // Latch LOW through deep sleep
+    }
+
+    // 5. Also hold TFT power pin LOW (belt-and-suspenders: MOSFET off + pin locked)
+    gpio_hold_en((gpio_num_t)PIN_TFT_PWR);
+
+    // 6. Wait for DROP button release, then deep sleep
     while (gpio_get_level(BTN_DROP) == 0) vTaskDelay(pdMS_TO_TICKS(20));
     vTaskDelay(pdMS_TO_TICKS(100));
 
-    // Wakeup on any button press (GPIO0=RIGHT, GPIO1=LEFT, GPIO2=ROTATE)
+    // Wakeup on any button press (RIGHT=GPIO0, LEFT=GPIO1, ROTATE=GPIO2)
     uint64_t mask = (1ULL << BTN_RIGHT) | (1ULL << BTN_LEFT) | (1ULL << BTN_ROTATE);
     esp_deep_sleep_enable_gpio_wakeup(mask, ESP_GPIO_WAKEUP_GPIO_LOW);
     esp_deep_sleep_start();
@@ -978,9 +999,17 @@ static void draw_arcade_menu(void) {
 void app_main(void) {
     ESP_LOGI(TAG, "Starting XIAO Arcade Console...");
 
-    // Release RST hold from previous deep sleep session
-    gpio_hold_dis((gpio_num_t)PIN_NUM_RST);
+    // Release all display pin holds from previous deep sleep
+    // (MOSI, CLK, CS, DC, RST were all held LOW; TFT_PWR was held LOW)
+    const gpio_num_t held_pins[] = {
+        PIN_TFT_PWR, PIN_NUM_RST, PIN_NUM_DC,
+        PIN_NUM_CS, PIN_NUM_MOSI, PIN_NUM_CLK
+    };
+    for (int i = 0; i < 6; i++) {
+        gpio_hold_dis(held_pins[i]);
+    }
 
+    // Configure button inputs with pull-ups
     gpio_config_t btn_config = {
         .pin_bit_mask = (1ULL << BTN_LEFT) | (1ULL << BTN_RIGHT) | (1ULL << BTN_ROTATE) | (1ULL << BTN_DROP),
         .mode = GPIO_MODE_INPUT,
@@ -990,12 +1019,18 @@ void app_main(void) {
     };
     gpio_config(&btn_config);
 
+    // Configure TFT power MOSFET pin (D7) and DC/RST as outputs
     gpio_config_t out_config = {
-        .pin_bit_mask = (1ULL << PIN_NUM_DC) | (1ULL << PIN_NUM_RST),
+        .pin_bit_mask = (1ULL << PIN_TFT_PWR) | (1ULL << PIN_NUM_DC) | (1ULL << PIN_NUM_RST),
         .mode = GPIO_MODE_OUTPUT
     };
     gpio_config(&out_config);
 
+    // Power ON the TFT via MOSFET
+    gpio_set_level(PIN_TFT_PWR, 1);
+    vTaskDelay(pdMS_TO_TICKS(150)); // Wait for TFT VCC rail to stabilize
+
+    // Initialize SPI bus
     spi_bus_config_t buscfg = {
         .miso_io_num = -1,
         .mosi_io_num = PIN_NUM_MOSI,
@@ -1012,7 +1047,8 @@ void app_main(void) {
     };
     ESP_ERROR_CHECK(spi_bus_add_device(SPI2_HOST, &devcfg, &spi));
 
-    buzzer_init();
+    // No buzzer init - D7 is now TFT power MOSFET
+    buzzer_init(); // Buzzer on D5 (GPIO23)
     st7789_init();
 
     current_game = STATE_MENU;
@@ -1292,7 +1328,31 @@ void app_main(void) {
             char brk_buf[32];
             snprintf(brk_buf, sizeof(brk_buf), "SCR:%04lu L:%d", (unsigned long)brk_score, brk_lives);
             draw_string(135, 12, brk_buf, COLOR_WHITE, COLOR_BLACK, 1);
+            // Speed indicator (right side)
+            char brk_spd[10];
+            int bs_int = (int)(brk_speed_mult * 10.0f + 0.5f);
+            if (bs_int % 10 == 0) snprintf(brk_spd, sizeof(brk_spd), "x%d", bs_int / 10);
+            else snprintf(brk_spd, sizeof(brk_spd), "x%.2g", brk_speed_mult);
+            draw_string(205, 12, brk_spd, COLOR_YELLOW, COLOR_BLACK, 1);
             st7789_fill_rect(0, 32, SCREEN_WIDTH, 2, COLOR_CYAN);
+
+            // ROTATE short = faster, DROP short = slower (immediate effect)
+            if (ev.rotate_short_click) {
+                float old = brk_speed_mult;
+                brk_speed_mult += 0.25f;
+                if (brk_speed_mult > 4.0f) brk_speed_mult = 4.0f;
+                float s = brk_speed_mult / old;
+                ball_vx *= s; ball_vy *= s;
+                sfx_move();
+            }
+            if (ev.drop_short_click) {
+                float old = brk_speed_mult;
+                brk_speed_mult -= 0.25f;
+                if (brk_speed_mult < 0.25f) brk_speed_mult = 0.25f;
+                float s = brk_speed_mult / old;
+                ball_vx *= s; ball_vy *= s;
+                sfx_move();
+            }
 
             // Smooth & Strictly Clamped Paddle Movement
             if (ev.left_pressed) {
@@ -1407,7 +1467,28 @@ void app_main(void) {
                 vTaskDelay(pdMS_TO_TICKS(200)); reset_pong_game(); continue;
             }
 
-            // --- PHYSICS & INPUT (unchanged) ---
+            // --- PHYSICS & INPUT ---
+
+            // LEFT/RIGHT = Decrease/Increase ball speed (0.5x - 4.0x in 0.25 steps)
+            // Speed change takes effect IMMEDIATELY on the live ball
+            if (ev.left_pressed) {
+                float old_mult = pong_speed_mult;
+                pong_speed_mult -= 0.25f;
+                if (pong_speed_mult < 0.5f) pong_speed_mult = 0.5f;
+                float scale = pong_speed_mult / old_mult;
+                pong_vx *= scale;
+                pong_vy *= scale;
+                sfx_move();
+            }
+            if (ev.right_pressed) {
+                float old_mult = pong_speed_mult;
+                pong_speed_mult += 0.25f;
+                if (pong_speed_mult > 4.0f) pong_speed_mult = 4.0f;
+                float scale = pong_speed_mult / old_mult;
+                pong_vx *= scale;
+                pong_vy *= scale;
+                sfx_move();
+            }
 
             // Player Paddle Controls (ROTATE = UP, DROP = DOWN)
             if (gpio_get_level(BTN_ROTATE) == 0 && p_paddle_y > 35.0f) {
@@ -1470,7 +1551,7 @@ void app_main(void) {
                     player_score++;
                     sfx_rotate();
                     if (player_score >= 9) pong_game_over = true;
-                    else { pong_bx = 120; pong_by = 160; pong_vx = -4.8f; pong_vy = 2.4f; }
+                    else { pong_bx = 120; pong_by = 160; pong_vx = -4.8f * pong_speed_mult; pong_vy = 2.4f * pong_speed_mult; }
                     break;
                 }
 
@@ -1479,7 +1560,7 @@ void app_main(void) {
                     comp_score++;
                     sfx_hit();
                     if (comp_score >= 9) pong_game_over = true;
-                    else { pong_bx = 120; pong_by = 160; pong_vx = 4.8f; pong_vy = -2.4f; }
+                    else { pong_bx = 120; pong_by = 160; pong_vx = 4.8f * pong_speed_mult; pong_vy = -2.4f * pong_speed_mult; }
                     break;
                 }
             }
@@ -1496,8 +1577,16 @@ void app_main(void) {
                 st7789_fill_rect(119, y, 2, 8, COLOR_DARKGRAY);
             }
 
-            // HUD: title left, scores right
+            // HUD: title left, speed indicator right
             draw_string(10, 10, "TENNIS", COLOR_WHITE, COLOR_BLACK, 2);
+            char spd_buf[12];
+            // Format speed as integer if whole number, else one decimal
+            int spd_int = (int)(pong_speed_mult * 10.0f + 0.5f);
+            if (spd_int % 10 == 0)
+                snprintf(spd_buf, sizeof(spd_buf), "SPDx%d", spd_int / 10);
+            else
+                snprintf(spd_buf, sizeof(spd_buf), "SPD%.1fx", pong_speed_mult);
+            draw_string(160, 12, spd_buf, COLOR_YELLOW, COLOR_BLACK, 1);
             draw_retro_squarish_num(65, 45, player_score, COLOR_GREEN);
             draw_retro_squarish_num(153, 45, comp_score, COLOR_CYAN);
 
