@@ -87,44 +87,32 @@
 - ESP32-C6 LP GPIOs are GPIO0-7 only — BTN_DROP (GPIO16) cannot be a wakeup source
 - gpio_pullup_en() must be called explicitly before sleep — LP domain pull-ups don't auto-persist
 
-### Inactivity Auto-Shutdown
-- 5 minutes of no button input -> automatic deep sleep
-
 ---
 
-## Games
+## Games & Multi-Level Systems
 
-| # | Game | State | Notes |
-|---|------|-------|-------|
-| 1 | Tetris | STATE_TETRIS | Full rotation, wall kicks |
-| 2 | Space Invaders | STATE_INVADERS | Waves + shields |
-| 3 | Breakout | STATE_BREAKOUT | Sub-step physics; ROTATE/DROP = speed |
-| 4 | Tennis (Pong) | STATE_PONG | Sub-step physics; LEFT/RIGHT = speed; 7-seg score |
-| 5 | Snake | STATE_SNAKE | Grid-based |
-| 6 | Flappy Bird | STATE_FLAPPY | Pipe obstacles |
-| 7 | Racer | STATE_RACER | WIP / placeholder |
-
-### In-Game Speed Control
-
-**Tennis:** LEFT = -0.25x, RIGHT = +0.25x | Range 0.5x-4.0x | Default: 1.0x (base = 4.8 px/tick)
-Immediate effect: live velocity rescaled by new/old ratio. HUD: "SPDx1.0" yellow top-right.
-
-**Breakout:** ROTATE short = +0.25x, DROP short = -0.25x | Range 0.25x-4.0x | Default: 1.0x
-Immediate effect. HUD: "x1", "x1.5" etc. yellow top-right.
+| # | Game | Levels / Progression | Notes |
+|---|------|----------------------|-------|
+| 1 | Tetris | Speed scales with score | Full rotation, wall kicks |
+| 2 | Space Invaders | **Waves 1..10+** | Aliens start lower, move faster, fire aggressively. Wave clear banner + bonus life |
+| 3 | Breakout | **Levels 1..10+** | 10 unique brick layouts (Rainbow, Checkerboard, Pyramid, Silver 2-Hit, Fortress, Stripes, Ring Vault, Low Wall, Staggered, Omega Vault). Level clear banner + bonus life |
+| 4 | Tennis (Pong) | Speed control (0.5x–4.0x) | Sub-step physics; LEFT/RIGHT = speed; 7-seg score |
+| 5 | Snake | Grid-based | Speed increases as snake grows |
+| 6 | Flappy Bird | Distance score | Pipe obstacles |
+| 7 | Racer | WIP / placeholder | Moving background, FPV |
 
 ---
 
 ## Git History
 
 ```
+547f968  Add 10+ multi-level progression for Breakout & Space Invaders
+8111087  Add CONTEXT.md project documentation & deep sleep wakeup fix
 dc53037  Add TFT MOSFET power control (D7/GPIO17) + buzzer on D5/GPIO23
 c296d0f  Tennis: double ball speed (vx 2.4->4.8, vy 0.7->1.4, accel 0.12->0.24)
 f9689dc  Fix all games: full-frame double-buffering across all 7 games
 51bd813  Initial commit: XIAO ESP32-C6 arcade console firmware
 ```
-
-NOTE: Deep sleep wakeup fix (simplify sleep, remove spi_bus_free, add gpio_pullup_en)
-is uncommitted — commit after confirming wakeup works.
 
 ---
 
@@ -134,20 +122,12 @@ is uncommitted — commit after confirming wakeup works.
 - Framework: ESP-IDF 5.5.4
 - Compiler: riscv32-esp-elf-gcc 14.2.0+20260121
 
-**If build fails with "riscv32-esp-elf-gcc: not found":**
-```bash
-rm -rf ~/.platformio/packages/toolchain-riscv32-esp
-pio run   # reinstalls cleanly
-```
-Root cause: idf_tools.py strip_container_dirs bug with package.json + riscv32-esp-elf at zip root.
-
 ---
 
 ## Outstanding Work
 
 1. Racer rework — moving background, race car sprites, FPV perspective (requested, not started)
 2. ZX Spectrum emulator — feasibility discussion only, not started
-3. Commit pending for deep sleep wakeup fix
 
 ---
 
@@ -157,9 +137,7 @@ Root cause: idf_tools.py strip_container_dirs bug with package.json + riscv32-es
 xiao_esp32c6_tetris/
 ├── CONTEXT.md          <- this file
 ├── main/
-│   └── main.c          <- ALL code: games + display driver + power mgmt (~1900 lines)
+│   └── main.c          <- ALL code: games + display driver + power mgmt (~1950 lines)
 ├── platformio.ini
 └── sdkconfig.defaults
 ```
-
-All code in single main.c — no external libraries.
