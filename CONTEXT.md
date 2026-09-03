@@ -22,7 +22,7 @@
 
 | Pin | GPIO | Function | Notes |
 |-----|------|----------|-------|
-| D0 | GPIO0 | BTN_RIGHT | LP GPIO — deep sleep wakeup source |
+| D0 | GPIO0 | BTN_RIGHT / BATTERY_ADC | LP GPIO — deep sleep wakeup source & ADC1_CH0 battery voltage divider |
 | D1 | GPIO1 | BTN_LEFT | LP GPIO — deep sleep wakeup source |
 | D2 | GPIO2 | BTN_ROTATE | LP GPIO — deep sleep wakeup source |
 | D3 | GPIO21 | SPI MOSI (SDA) | |
@@ -37,6 +37,26 @@
 > CRITICAL: D6/GPIO16 (BTN_DROP) is NOT an LP GPIO on ESP32-C6.
 > It CANNOT be a deep sleep wakeup source.
 > Wakeup is via D0/D1/D2 (RIGHT/LEFT/ROTATE) only.
+
+---
+
+## Battery Voltage Monitor & Circuit (250mAh LiPo)
+
+- **ADC Channel:** `ADC_UNIT_1`, `ADC_CHANNEL_0` on **D0 (GPIO0)** multiplexed with `BTN_RIGHT`.
+- **Resistor Divider:**
+  - $R_1 = 100\text{k}\Omega$ between **VBAT** (LiPo positive) and **D0 (GPIO0)**.
+  - $R_2 = 220\text{k}\Omega$ between **D0 (GPIO0)** and **GND**.
+  - Tactile switch connects **D0 (GPIO0)** directly to **GND** in parallel across $R_2$.
+- **Voltage Divider Ratio:** $\frac{R_2}{R_1 + R_2} = \frac{220\text{k}\Omega}{320\text{k}\Omega} = 0.6875$.
+  - 4.20V battery $\rightarrow$ 2.88V at D0 (reads logic HIGH digitally, ADC measures voltage).
+  - 3.70V battery $\rightarrow$ 2.54V at D0.
+  - 3.25V cutoff $\rightarrow$ 2.23V at D0.
+- **Button Press Discrimination:** When BTN_RIGHT is pressed, D0 is shorted to GND ($<0.4\text{V}$). The firmware detects the press and ignores ADC samples during presses to preserve the battery reading cache.
+- **Persistent HUD Icon:** 18x9 px battery casing with positive terminal tip, rendered consistently across Arcade Menu and all 7 games (Tetris, Invaders, Breakout, Tennis, Snake, Flappy, Racer):
+  - 3 Green Bars: $>70\%$ charge ($\ge 3.88\text{V}$)
+  - 2 Yellow Bars: $35\% - 70\%$ charge ($3.56\text{V} - 3.88\text{V}$)
+  - 1 Red Bar: $10\% - 35\%$ charge ($3.34\text{V} - 3.56\text{V}$)
+  - Blinking Empty Red Bar: $<10\%$ critical warning ($< 3.34\text{V}$)
 
 ---
 

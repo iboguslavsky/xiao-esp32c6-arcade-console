@@ -13,6 +13,9 @@
 #include "esp_random.h"
 #include "esp_sleep.h"
 #include "esp_heap_caps.h"
+#include "esp_adc/adc_oneshot.h"
+#include "esp_adc/adc_cali.h"
+#include "esp_adc/adc_cali_scheme.h"
 
 static const char *TAG = "ARCADE";
 
@@ -456,6 +459,139 @@ static void draw_game_over_modal(const char *title, uint32_t score, int level, u
 }
 
 // ============================================================================
+// BATTERY MONITORING SUBSYSTEM (ADC on BTN_RIGHT / D0 / GPIO0 / ADC1_CH0)
+// Multiplexed with BTN_RIGHT via R1=100k (to VBAT) and R2=220k (to GND)
+// ============================================================================
+#define BATTERY_ADC_UNIT        ADC_UNIT_1
+#define BATTERY_ADC_CHANNEL     ADC_CHANNEL_0 // GPIO0 (D0 / BTN_RIGHT)
+#define BATTERY_DIVIDER_RATIO   0.6875f       // 220k / (100k + 220k) = 0.6875
+
+static adc_oneshot_unit_handle_t battery_adc_handle = NULL;
+static adc_cali_handle_t battery_cali_handle = NULL;
+static float battery_cached_voltage = 3.90f;   // Start with reasonable default ~75%
+static int battery_cached_percent = 75;
+static int64_t battery_last_read_time = 0;
+
+static void battery_monitor_init(void) {
+    adc_oneshot_unit_init_cfg_t init_cfg = {
+        .unit_id = BATTERY_ADC_UNIT,
+    };
+    esp_err_t err = adc_oneshot_new_unit(&init_cfg, &battery_adc_handle);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "ADC unit init failed: %d", err);
+        return;
+    }
+
+    adc_oneshot_chan_cfg_t chan_cfg = {
+        .bitwidth = ADC_BITWIDTH_DEFAULT,
+        .atten = ADC_ATTEN_DB_12, // Measure up to ~3.3V
+    };
+    adc_oneshot_config_channel(battery_adc_handle, BATTERY_ADC_CHANNEL, &chan_cfg);
+
+    // Try curve fitting calibration (standard for ESP32-C6)
+    adc_cali_curve_fitting_config_t cali_cfg = {
+        .unit_id = BATTERY_ADC_UNIT,
+        .chan = BATTERY_ADC_CHANNEL,
+        .atten = ADC_ATTEN_DB_12,
+        .bitwidth = ADC_BITWIDTH_DEFAULT,
+    };
+    if (adc_cali_create_scheme_curve_fitting(&cali_cfg, &battery_cali_handle) != ESP_OK) {
+        battery_cali_handle = NULL;
+    }
+}
+
+static float update_battery_reading(void) {
+    if (!battery_adc_handle) return battery_cached_voltage;
+
+    int raw_sum = 0;
+    int samples = 8;
+    for (int i = 0; i < samples; i++) {
+        int r = 0;
+        if (adc_oneshot_read(battery_adc_handle, BATTERY_ADC_CHANNEL, &r) == ESP_OK) {
+            raw_sum += r;
+        }
+    }
+    int raw_avg = raw_sum / samples;
+
+    float pin_v = 0.0f;
+    if (battery_cali_handle) {
+        int mv = 0;
+        adc_cali_raw_to_voltage(battery_cali_handle, raw_avg, &mv);
+        pin_v = mv / 1000.0f;
+    } else {
+        pin_v = (raw_avg / 4095.0f) * 3.3f;
+    }
+
+    // If button is currently pressed (pin pulled near 0V), keep previous cached value
+    if (pin_v < 0.4f) {
+        return battery_cached_voltage;
+    }
+
+    // Reconstruct VBAT from divider ratio: V_pin = VBAT * (R2 / (R1 + R2))
+    float vbat = pin_v / BATTERY_DIVIDER_RATIO;
+    if (vbat > 4.35f) vbat = 4.35f;
+    if (vbat < 2.80f) vbat = 2.80f;
+
+    // Exponential moving average filter for smooth, stable indicator
+    battery_cached_voltage = (battery_cached_voltage * 0.75f) + (vbat * 0.25f);
+
+    // Standard 3.7V LiPo discharge curve approximation
+    int pct = 0;
+    if (battery_cached_voltage >= 4.15f) pct = 100;
+    else if (battery_cached_voltage <= 3.25f) pct = 0;
+    else pct = (int)((battery_cached_voltage - 3.25f) / (4.15f - 3.25f) * 100.0f);
+    if (pct < 0) pct = 0;
+    if (pct > 100) pct = 100;
+    battery_cached_percent = pct;
+
+    return battery_cached_voltage;
+}
+
+static void check_battery_periodic(void) {
+    int64_t now = esp_timer_get_time();
+    if (now - battery_last_read_time >= 2000000ULL || battery_last_read_time == 0) { // Read every 2s
+        battery_last_read_time = now;
+        update_battery_reading();
+    }
+}
+
+// Persistent Battery Gauge (18x9 px body + 2x5 px terminal tip)
+static void draw_battery_indicator(uint16_t x, uint16_t y) {
+    // Battery Shell (18x9)
+    st7789_fill_rect(x, y, 18, 9, COLOR_WHITE);
+    st7789_fill_rect(x + 1, y + 1, 16, 7, COLOR_BLACK);
+    // Positive terminal nipple on right (+ terminal)
+    st7789_fill_rect(x + 18, y + 2, 2, 5, COLOR_WHITE);
+
+    // Charge level in 3 distinct segment bars (up to 14px internal width)
+    // 0 bars: empty/critical, 1 bar: low (<35%), 2 bars: medium (35-70%), 3 bars: full (>70%)
+    int bars = 0;
+    uint16_t bar_color = COLOR_GREEN;
+    if (battery_cached_percent > 70) {
+        bars = 3;
+        bar_color = COLOR_GREEN;
+    } else if (battery_cached_percent > 35) {
+        bars = 2;
+        bar_color = COLOR_YELLOW;
+    } else if (battery_cached_percent > 10) {
+        bars = 1;
+        bar_color = COLOR_RED;
+    } else {
+        bars = 0; // Blinking empty red outline
+        static int blink = 0;
+        blink++;
+        if ((blink % 20) < 10) {
+            st7789_fill_rect(x + 2, y + 2, 3, 5, COLOR_RED);
+        }
+        return;
+    }
+
+    if (bars >= 1) st7789_fill_rect(x + 2,  y + 2, 4, 5, bar_color);
+    if (bars >= 2) st7789_fill_rect(x + 7,  y + 2, 4, 5, bar_color);
+    if (bars >= 3) st7789_fill_rect(x + 12, y + 2, 4, 5, bar_color);
+}
+
+// ============================================================================
 // GAME 1: TETRIS
 // ============================================================================
 #define BOARD_COLS      10
@@ -544,6 +680,7 @@ static void draw_next_piece_preview(void) {
 
 static void render_tetris_sidebar(void) {
     draw_string(25, 10, "TETRIS", COLOR_CYAN, COLOR_BLACK, 2);
+    draw_battery_indicator(185, 13);
     draw_string(140, 40, "NEXT:", COLOR_LIGHTGRAY, COLOR_BLACK, 1);
     draw_next_piece_preview();
 
@@ -1169,12 +1306,17 @@ static void update_arcade_menu_items(void) {
     draw_string(15, 177, (menu_selected == 4) ? "> 5. SNAKE"    : "  5. SNAKE",    colors[4], COLOR_BLACK, 2);
     draw_string(15, 205, (menu_selected == 5) ? "> 6. FLAPPY"   : "  6. FLAPPY",   colors[5], COLOR_BLACK, 2);
     draw_string(15, 233, (menu_selected == 6) ? "> 7. RACER"    : "  7. RACER",    colors[6], COLOR_BLACK, 2);
+
+    // Persistent battery indicator on menu header
+    draw_battery_indicator(212, 13);
+
     fb_present();
 }
 
 static void draw_arcade_menu(void) {
     st7789_fill_rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, COLOR_BLACK);
-    draw_string(20, 10, "ARCADE CONSOLE", COLOR_CYAN, COLOR_BLACK, 2);
+    draw_string(15, 10, "ARCADE CONSOLE", COLOR_CYAN, COLOR_BLACK, 2);
+    draw_battery_indicator(212, 13);
     st7789_fill_rect(10, 32, 220, 3, COLOR_MAGENTA);
 
     draw_string(25, 45, "SELECT GAME:", COLOR_WHITE, COLOR_BLACK, 1);
@@ -1208,6 +1350,10 @@ void app_main(void) {
         .intr_type = GPIO_INTR_DISABLE
     };
     gpio_config(&btn_config);
+
+    // Initialize Battery ADC Monitor (on D0 / BTN_RIGHT)
+    battery_monitor_init();
+    update_battery_reading();
 
     // Configure TFT power MOSFET pin (D7) and DC/RST as outputs
     gpio_config_t out_config = {
@@ -1246,8 +1392,12 @@ void app_main(void) {
 
     int64_t last_drop_time = esp_timer_get_time();
     int64_t last_activity_time = esp_timer_get_time(); // 5-minute inactivity timer tracker
+    int64_t last_menu_batt_redraw = esp_timer_get_time();
 
     while (1) {
+        // Periodic battery voltage update
+        check_battery_periodic();
+
         // Read non-blocking input events
         ButtonEvents ev = get_button_events();
 
@@ -1348,6 +1498,13 @@ void app_main(void) {
                 last_drop_time = now;
             }
 
+            // Periodic battery indicator update in Tetris sidebar
+            static int64_t last_tetris_batt_time = 0;
+            if (now - last_tetris_batt_time > 1000000ULL) {
+                last_tetris_batt_time = now;
+                draw_battery_indicator(185, 13);
+            }
+
             fb_present();
         }
 
@@ -1367,7 +1524,8 @@ void app_main(void) {
             draw_string(10, 10, "INVADERS", COLOR_GREEN, COLOR_BLACK, 2);
             char inv_buf[32];
             snprintf(inv_buf, sizeof(inv_buf), "SCR:%04lu L:%d", (unsigned long)inv_score, inv_lives);
-            draw_string(135, 12, inv_buf, COLOR_WHITE, COLOR_BLACK, 1);
+            draw_string(115, 12, inv_buf, COLOR_WHITE, COLOR_BLACK, 1);
+            draw_battery_indicator(214, 11);
             st7789_fill_rect(0, 32, SCREEN_WIDTH, 2, COLOR_GREEN);
 
             // Smooth & Fast Defender Ship Movement
@@ -1543,13 +1701,14 @@ void app_main(void) {
             draw_string(10, 10, "BREAKOUT", COLOR_CYAN, COLOR_BLACK, 2);
             char brk_buf[32];
             snprintf(brk_buf, sizeof(brk_buf), "S:%04lu L:%d LVL:%d", (unsigned long)brk_score, brk_lives, brk_level);
-            draw_string(115, 12, brk_buf, COLOR_WHITE, COLOR_BLACK, 1);
-            // Speed indicator (right side)
+            draw_string(105, 12, brk_buf, COLOR_WHITE, COLOR_BLACK, 1);
+            // Speed indicator
             char brk_spd[10];
             int bs_int = (int)(brk_speed_mult * 10.0f + 0.5f);
             if (bs_int % 10 == 0) snprintf(brk_spd, sizeof(brk_spd), "x%d", bs_int / 10);
             else snprintf(brk_spd, sizeof(brk_spd), "x%.2g", brk_speed_mult);
-            draw_string(212, 12, brk_spd, COLOR_YELLOW, COLOR_BLACK, 1);
+            draw_string(186, 12, brk_spd, COLOR_YELLOW, COLOR_BLACK, 1);
+            draw_battery_indicator(214, 11);
             st7789_fill_rect(0, 32, SCREEN_WIDTH, 2, COLOR_CYAN);
 
             // ROTATE short = faster, DROP short = slower (immediate effect)
@@ -1825,7 +1984,8 @@ void app_main(void) {
                 snprintf(spd_buf, sizeof(spd_buf), "SPDx%d", spd_int / 10);
             else
                 snprintf(spd_buf, sizeof(spd_buf), "SPD%.1fx", pong_speed_mult);
-            draw_string(160, 12, spd_buf, COLOR_YELLOW, COLOR_BLACK, 1);
+            draw_string(148, 12, spd_buf, COLOR_YELLOW, COLOR_BLACK, 1);
+            draw_battery_indicator(214, 11);
             draw_retro_squarish_num(65, 45, player_score, COLOR_GREEN);
             draw_retro_squarish_num(153, 45, comp_score, COLOR_CYAN);
 
@@ -1898,10 +2058,11 @@ void app_main(void) {
             // Draw Food
             st7789_fill_rect(food_x * 12 + 1, 40 + food_y * 12 + 1, 9, 9, COLOR_RED);
 
-            // Draw Score
+            // Draw Score and Battery Indicator
             char buf[32];
             snprintf(buf, sizeof(buf), "SCORE:%04d", snake_score);
-            draw_string(140, 10, buf, COLOR_WHITE, COLOR_BLACK, 1);
+            draw_string(115, 10, buf, COLOR_WHITE, COLOR_BLACK, 1);
+            draw_battery_indicator(214, 9);
 
             fb_present();
 
@@ -1978,7 +2139,8 @@ void app_main(void) {
             draw_string(10, 10, "FLAPPY", COLOR_YELLOW, COLOR_BLACK, 2);
             char buf[32];
             snprintf(buf, sizeof(buf), "SCR:%04d LVL:%d", flappy_score, flappy_level);
-            draw_string(110, 12, buf, COLOR_WHITE, COLOR_BLACK, 1);
+            draw_string(105, 12, buf, COLOR_WHITE, COLOR_BLACK, 1);
+            draw_battery_indicator(214, 11);
             st7789_fill_rect(0, 32, SCREEN_WIDTH, 2, COLOR_YELLOW);
 
             // Push complete frame atomically over 40MHz SPI DMA
@@ -2163,12 +2325,13 @@ void app_main(void) {
 
             // Clean Non-Overlapping HUD
             char racer_hud[40];
-            snprintf(racer_hud, sizeof(racer_hud), "%03dMPH L:%d PASS:%d", (int)racer_speed_mph, racer_lives, racer_cars_passed);
-            draw_string(10, 10, racer_hud, turbo ? COLOR_YELLOW : COLOR_WHITE, COLOR_BLACK, 1);
+            snprintf(racer_hud, sizeof(racer_hud), "%03dMPH L:%d P:%d", (int)racer_speed_mph, racer_lives, racer_cars_passed);
+            draw_string(8, 10, racer_hud, turbo ? COLOR_YELLOW : COLOR_WHITE, COLOR_BLACK, 1);
 
             char score_buf[20];
             snprintf(score_buf, sizeof(score_buf), "S:%05lu", (unsigned long)racer_score);
-            draw_string(170, 10, score_buf, COLOR_CYAN, COLOR_BLACK, 1);
+            draw_string(150, 10, score_buf, COLOR_CYAN, COLOR_BLACK, 1);
+            draw_battery_indicator(214, 9);
 
             st7789_fill_rect(0, 24, SCREEN_WIDTH, 2, COLOR_CYAN);
 
