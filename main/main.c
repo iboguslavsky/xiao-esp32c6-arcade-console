@@ -464,7 +464,7 @@ static void draw_game_over_modal(const char *title, uint32_t score, int level, u
 // ============================================================================
 #define BATTERY_ADC_UNIT        ADC_UNIT_1
 #define BATTERY_ADC_CHANNEL     ADC_CHANNEL_0 // GPIO0 (D0 / BTN_RIGHT)
-#define BATTERY_DIVIDER_RATIO   0.6875f       // 220k / (100k + 220k) = 0.6875
+#define BATTERY_DIVIDER_RATIO   0.5000f       // 180k / (180k + 180k) = 0.5000
 
 static adc_oneshot_unit_handle_t battery_adc_handle = NULL;
 static adc_cali_handle_t battery_cali_handle = NULL;

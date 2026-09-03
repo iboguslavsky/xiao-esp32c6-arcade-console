@@ -44,13 +44,13 @@
 
 - **ADC Channel:** `ADC_UNIT_1`, `ADC_CHANNEL_0` on **D0 (GPIO0)** multiplexed with `BTN_RIGHT`.
 - **Resistor Divider:**
-  - $R_1 = 100\text{k}\Omega$ between **VBAT** (LiPo positive) and **D0 (GPIO0)**.
-  - $R_2 = 220\text{k}\Omega$ between **D0 (GPIO0)** and **GND**.
+  - $R_1 = 180\text{k}\Omega$ between **VBAT** (LiPo positive) and **D0 (GPIO0)**.
+  - $R_2 = 180\text{k}\Omega$ between **D0 (GPIO0)** and **GND**.
   - Tactile switch connects **D0 (GPIO0)** directly to **GND** in parallel across $R_2$.
-- **Voltage Divider Ratio:** $\frac{R_2}{R_1 + R_2} = \frac{220\text{k}\Omega}{320\text{k}\Omega} = 0.6875$.
-  - 4.20V battery $\rightarrow$ 2.88V at D0 (reads logic HIGH digitally, ADC measures voltage).
-  - 3.70V battery $\rightarrow$ 2.54V at D0.
-  - 3.25V cutoff $\rightarrow$ 2.23V at D0.
+- **Voltage Divider Ratio:** $\frac{R_2}{R_1 + R_2} = \frac{180\text{k}\Omega}{360\text{k}\Omega} = \mathbf{0.5000}$.
+  - 4.20V battery $\rightarrow$ 2.10V at D0 (safe for 3.3V ADC).
+  - 3.70V battery $\rightarrow$ 1.85V at D0.
+  - 3.25V cutoff $\rightarrow$ 1.625V at D0.
 - **Button Press Discrimination:** When BTN_RIGHT is pressed, D0 is shorted to GND ($<0.4\text{V}$). The firmware detects the press and ignores ADC samples during presses to preserve the battery reading cache.
 - **Persistent HUD Icon:** 18x9 px battery casing with positive terminal tip, rendered consistently across Arcade Menu and all 7 games (Tetris, Invaders, Breakout, Tennis, Snake, Flappy, Racer):
   - 3 Green Bars: $>70\%$ charge ($\ge 3.88\text{V}$)
