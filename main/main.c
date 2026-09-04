@@ -16,6 +16,7 @@
 #include "esp_adc/adc_oneshot.h"
 #include "esp_adc/adc_cali.h"
 #include "esp_adc/adc_cali_scheme.h"
+#include "driver/rtc_io.h"
 
 static const char *TAG = "ARCADE";
 
@@ -529,6 +530,7 @@ static float update_battery_reading(void) {
 
     // Reconstruct VBAT from divider ratio: V_pin = VBAT * (R2 / (R1 + R2))
     float vbat = pin_v / BATTERY_DIVIDER_RATIO;
+    ESP_LOGI("BATT_DIAG", "ADC Raw: %d, Pin Volts: %.3f V, Reconstructed VBAT: %.3f V", raw_avg, pin_v, vbat);
     if (vbat > 4.35f) vbat = 4.35f;
     if (vbat < 2.80f) vbat = 2.80f;
 
@@ -1266,7 +1268,8 @@ static void enter_power_down_deep_sleep(void) {
     gpio_hold_en((gpio_num_t)PIN_NUM_RST);
 
     // 4. Ensure LP-domain pull-ups on wakeup buttons survive deep sleep
-    gpio_pullup_en((gpio_num_t)BTN_RIGHT);
+    // Note: BTN_RIGHT (GPIO0) has external 180k pull-up to VBAT, do NOT enable internal pullup!
+    gpio_pullup_dis((gpio_num_t)BTN_RIGHT);
     gpio_pullup_en((gpio_num_t)BTN_LEFT);
     gpio_pullup_en((gpio_num_t)BTN_ROTATE);
 
@@ -1341,15 +1344,29 @@ void app_main(void) {
     gpio_hold_dis((gpio_num_t)PIN_TFT_PWR);
     gpio_hold_dis((gpio_num_t)PIN_NUM_RST);
 
-    // Configure button inputs with pull-ups
+    // Configure button inputs: LEFT, ROTATE, DROP with pull-ups
     gpio_config_t btn_config = {
-        .pin_bit_mask = (1ULL << BTN_LEFT) | (1ULL << BTN_RIGHT) | (1ULL << BTN_ROTATE) | (1ULL << BTN_DROP),
+        .pin_bit_mask = (1ULL << BTN_LEFT) | (1ULL << BTN_ROTATE) | (1ULL << BTN_DROP),
         .mode = GPIO_MODE_INPUT,
         .pull_up_en = GPIO_PULLUP_ENABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .intr_type = GPIO_INTR_DISABLE
     };
     gpio_config(&btn_config);
+
+    // Configure BTN_RIGHT (D0 / GPIO0) as INPUT with NO pull-up or pull-down
+    gpio_config_t right_btn_config = {
+        .pin_bit_mask = (1ULL << BTN_RIGHT),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE
+    };
+    gpio_config(&right_btn_config);
+    gpio_pullup_dis(BTN_RIGHT);
+    rtc_gpio_pullup_dis(BTN_RIGHT);
+    rtc_gpio_pulldown_dis(BTN_RIGHT);
+    rtc_gpio_hold_dis(BTN_RIGHT);
 
     // Initialize Battery ADC Monitor (on D0 / BTN_RIGHT)
     battery_monitor_init();
