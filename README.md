@@ -130,7 +130,7 @@ This project is built using [PlatformIO](https://platformio.org/) with the nativ
 
 ### 2. Clone the Repository
 ```bash
-git clone https://github.com/your-username/xiao-esp32c6-arcade-console.git
+git clone https://github.com/iboguslavsky/xiao-esp32c6-arcade-console.git
 cd xiao-esp32c6-arcade-console
 ```
 
