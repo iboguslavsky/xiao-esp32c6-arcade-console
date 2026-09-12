@@ -537,11 +537,11 @@ static float update_battery_reading(void) {
     // Exponential moving average filter for smooth, stable indicator
     battery_cached_voltage = (battery_cached_voltage * 0.75f) + (vbat * 0.25f);
 
-    // Standard 3.7V LiPo discharge curve approximation
+    // Standard 3.7V LiPo discharge curve mapped from reconstructed vbat
     int pct = 0;
-    if (battery_cached_voltage >= 4.15f) pct = 100;
-    else if (battery_cached_voltage <= 3.25f) pct = 0;
-    else pct = (int)((battery_cached_voltage - 3.25f) / (4.15f - 3.25f) * 100.0f);
+    if (vbat >= 4.20f) pct = 100;
+    else if (vbat <= 3.00f) pct = 0;
+    else pct = (int)((vbat - 3.00f) / 1.20f * 100.0f);
     if (pct < 0) pct = 0;
     if (pct > 100) pct = 100;
     battery_cached_percent = pct;
@@ -1268,24 +1268,31 @@ static void enter_power_down_deep_sleep(void) {
     gpio_hold_en((gpio_num_t)PIN_NUM_RST);
 
     // 4. Ensure LP-domain pull-ups on wakeup buttons survive deep sleep
-    // Note: BTN_RIGHT (GPIO0) has external 180k pull-up to VBAT, do NOT enable internal pullup!
-    gpio_pullup_dis((gpio_num_t)BTN_RIGHT);
+    // Note: BTN_RIGHT (GPIO0) shares the battery divider. Do NOT enable internal pullup on it!
+    gpio_pullup_dis(BTN_RIGHT);
+    gpio_pulldown_dis(BTN_RIGHT);
+    rtc_gpio_pullup_dis(BTN_RIGHT);
+    rtc_gpio_pulldown_dis(BTN_RIGHT);
+    gpio_sleep_set_pull_mode(BTN_RIGHT, GPIO_FLOATING);
+
+    // Pull-ups only for buttons that do not share the battery divider
     gpio_pullup_en((gpio_num_t)BTN_LEFT);
     gpio_pullup_en((gpio_num_t)BTN_ROTATE);
 
-    // 5. Wait for DROP to be released, then wait for ALL wakeup buttons to be
+    // 5. Wait for DROP to be released, then wait for wakeup buttons to be
     //    clearly HIGH. Wakeup is level-triggered LOW — any LOW pin at sleep
     //    entry causes an immediate spurious wakeup.
     while (gpio_get_level(BTN_DROP)   == 0) vTaskDelay(pdMS_TO_TICKS(20));
-    while (gpio_get_level(BTN_RIGHT)  == 0 ||
-           gpio_get_level(BTN_LEFT)   == 0 ||
+    while (gpio_get_level(BTN_LEFT)   == 0 ||
            gpio_get_level(BTN_ROTATE) == 0) {
         vTaskDelay(pdMS_TO_TICKS(20));
     }
     vTaskDelay(pdMS_TO_TICKS(500)); // Extra debounce — hand fully away
 
-    // 6. Arm wakeup on any button press and enter deep sleep
-    uint64_t mask = (1ULL << BTN_RIGHT) | (1ULL << BTN_LEFT) | (1ULL << BTN_ROTATE);
+    // 6. Arm wakeup on BTN_LEFT and BTN_ROTATE and enter deep sleep
+    // Note: Do NOT put BTN_RIGHT in wakeup mask, because ESP-IDF sleep driver
+    // automatically turns on internal pull-up and pad hold on wakeup pins!
+    uint64_t mask = (1ULL << BTN_LEFT) | (1ULL << BTN_ROTATE);
     esp_deep_sleep_enable_gpio_wakeup(mask, ESP_GPIO_WAKEUP_GPIO_LOW);
     esp_deep_sleep_start();
 }
@@ -1338,11 +1345,15 @@ static void draw_arcade_menu(void) {
 // MAIN APPLICATION LOOP & EVENT ROUTER
 // ============================================================================
 void app_main(void) {
-    ESP_LOGI(TAG, "Starting XIAO Arcade Console...");
+    esp_sleep_wakeup_cause_t wake_cause = esp_sleep_get_wakeup_cause();
+    ESP_LOGI(TAG, "Starting XIAO Arcade Console (Wake cause: %d)...", wake_cause);
 
-    // Release pin holds set during previous deep sleep (TFT_PWR + RST)
+    // Release pin holds set during previous deep sleep (TFT_PWR, RST, and wakeup buttons)
     gpio_hold_dis((gpio_num_t)PIN_TFT_PWR);
     gpio_hold_dis((gpio_num_t)PIN_NUM_RST);
+    gpio_hold_dis((gpio_num_t)BTN_RIGHT);
+    gpio_hold_dis((gpio_num_t)BTN_LEFT);
+    gpio_hold_dis((gpio_num_t)BTN_ROTATE);
 
     // Configure button inputs: LEFT, ROTATE, DROP with pull-ups
     gpio_config_t btn_config = {
@@ -1370,6 +1381,7 @@ void app_main(void) {
 
     // Initialize Battery ADC Monitor (on D0 / BTN_RIGHT)
     battery_monitor_init();
+    gpio_input_enable(BTN_RIGHT); // Re-enable digital input buffer disabled by ADC init
     update_battery_reading();
 
     // Configure TFT power MOSFET pin (D7) and DC/RST as outputs
@@ -1388,6 +1400,8 @@ void app_main(void) {
         .miso_io_num = -1,
         .mosi_io_num = PIN_NUM_MOSI,
         .sclk_io_num = PIN_NUM_CLK,
+        .quadwp_io_num = -1,
+        .quadhd_io_num = -1,
         .max_transfer_sz = SCREEN_WIDTH * SCREEN_HEIGHT * 2
     };
     ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO));
@@ -1400,7 +1414,6 @@ void app_main(void) {
     };
     ESP_ERROR_CHECK(spi_bus_add_device(SPI2_HOST, &devcfg, &spi));
 
-    // No buzzer init - D7 is now TFT power MOSFET
     buzzer_init(); // Buzzer on D5 (GPIO23)
     st7789_init();
 
