@@ -917,6 +917,14 @@ static const uint8_t ALIEN_JELLY[8] = {
     0b01111110, 0b11111111, 0b11011011, 0b11111111,
     0b01111110, 0b00100100, 0b01011010, 0b01000010
 };
+static const uint8_t ALIEN_SKULL[8] = { // Elite Commander Alien
+    0b00111100, 0b01111110, 0b11011011, 0b11111111,
+    0b01111110, 0b01011010, 0b10000001, 0b11000011
+};
+static const uint8_t ALIEN_BAT[8] = { // Fast Winged Alien
+    0b10000001, 0b11000011, 0b11111111, 0b11011011,
+    0b01111110, 0b00111100, 0b01000010, 0b10000001
+};
 static const uint8_t ALIEN_EXPLOSION[8] = {
     0b10000001, 0b01000010, 0b00100100, 0b00011000,
     0b00011000, 0b00100100, 0b01000010, 0b10000001
@@ -939,13 +947,46 @@ static uint32_t inv_score = 0;
 static int inv_lives = 3;
 static bool inv_game_over = false;
 static int inv_level = 1;
+static const char *inv_formation_name = "CLASSIC SQUAD";
 
 static void setup_space_invaders_wave(int level) {
     inv_dir = 1; ship_x = 105;
     p_bullet_x = -1; p_bullet_y = -1; e_bullet_x = -1; e_bullet_y = -1;
 
-    // Aliens start lower on screen each wave (up to 24px lower)
-    int start_y = 44 + ((level - 1) % 4) * 6;
+    // Start height scales slightly with level (aliens start lower, but clamped)
+    int start_y = 44 + ((level - 1) % 4) * 4;
+
+    // 6 Distinct Formations cycling through waves:
+    // Wave 1: Classic Standard (24 aliens)
+    // Wave 2: Flying V-Formation (Apex vanguard lead by Commander)
+    // Wave 3: Pincer Flankers (Split wing columns)
+    // Wave 4: Diamond Fortress (Reinforced core)
+    // Wave 5: Staggered Checkerboard (Difficult interleaved formation)
+    // Wave 6: Heavy Dreadnought (High-density front lines)
+    int pattern = (level - 1) % 6;
+
+    // Rich palette rotating across waves
+    static const uint16_t wave_colors[6][3] = {
+        { COLOR_CYAN,    COLOR_GREEN,   COLOR_YELLOW  }, // Wave 1: Retro Neon
+        { COLOR_MAGENTA, COLOR_ORANGE,  COLOR_RED     }, // Wave 2: Crimson Assault
+        { COLOR_YELLOW,  COLOR_CYAN,    COLOR_GREEN   }, // Wave 3: Emerald Flank
+        { COLOR_WHITE,   COLOR_MAGENTA, COLOR_CYAN    }, // Wave 4: Cosmic Diamond
+        { COLOR_GREEN,   COLOR_YELLOW,  COLOR_ORANGE  }, // Wave 5: Toxic Swarm
+        { COLOR_RED,     COLOR_MAGENTA, COLOR_WHITE   }  // Wave 6: Dread Armada
+    };
+
+    uint16_t c_top = wave_colors[pattern][0];
+    uint16_t c_mid = wave_colors[pattern][1];
+    uint16_t c_bot = wave_colors[pattern][2];
+
+    switch (pattern) {
+        case 0: inv_formation_name = "CLASSIC SQUAD"; break;
+        case 1: inv_formation_name = "V-FORMATION"; break;
+        case 2: inv_formation_name = "PINCER FLANK"; break;
+        case 3: inv_formation_name = "DIAMOND MATRIX"; break;
+        case 4: inv_formation_name = "CHECKER SWARM"; break;
+        default: inv_formation_name = "DREAD ARMADA"; break;
+    }
 
     for (int r = 0; r < INV_ROWS; r++) {
         for (int c = 0; c < INV_COLS; c++) {
@@ -954,16 +995,73 @@ static void setup_space_invaders_wave(int level) {
             invaders[idx].y = start_y + r * 24;
             invaders[idx].alive = true;
 
-            // Vary colors & types on higher levels
-            if (r == 0) {
-                invaders[idx].color = (level >= 5) ? COLOR_MAGENTA : COLOR_CYAN;
-                invaders[idx].bmp = ALIEN_SQUID;
-            } else if (r < 3) {
-                invaders[idx].color = (level % 2 == 0) ? COLOR_ORANGE : COLOR_GREEN;
-                invaders[idx].bmp = ALIEN_CRAB;
+            // Pattern-specific layout & density modifications
+            if (pattern == 1) {
+                // V-Formation: Center points forward/down, wings sweep outward
+                int v_shift = abs(c - 2) * 8;
+                invaders[idx].y += (16 - v_shift);
+                if (r == 0 && (c == 2 || c == 3)) {
+                    invaders[idx].bmp = ALIEN_SKULL;
+                    invaders[idx].color = COLOR_WHITE;
+                } else if (r <= 1) {
+                    invaders[idx].bmp = ALIEN_BAT;
+                    invaders[idx].color = c_top;
+                } else {
+                    invaders[idx].bmp = ALIEN_CRAB;
+                    invaders[idx].color = c_mid;
+                }
+            } else if (pattern == 2) {
+                // Pincer Flankers: Empty center in top rows, heavy on left & right wings
+                if (r < 2 && (c == 2 || c == 3)) {
+                    invaders[idx].alive = false; // Carve out open center funnel
+                }
+                if (c == 0 || c == 5) {
+                    invaders[idx].bmp = ALIEN_BAT;
+                    invaders[idx].color = c_top;
+                } else if (r == 0) {
+                    invaders[idx].bmp = ALIEN_SKULL;
+                    invaders[idx].color = c_mid;
+                } else {
+                    invaders[idx].bmp = ALIEN_JELLY;
+                    invaders[idx].color = c_bot;
+                }
+            } else if (pattern == 3) {
+                // Diamond Fortress: Outer corners omitted, diamond cluster
+                if ((r == 0 && (c == 0 || c == 5)) || (r == 3 && (c == 0 || c == 5))) {
+                    invaders[idx].alive = false;
+                }
+                if (r == 1 && (c == 2 || c == 3)) {
+                    invaders[idx].bmp = ALIEN_SKULL; // Center core bosses
+                    invaders[idx].color = COLOR_YELLOW;
+                } else if (r <= 1) {
+                    invaders[idx].bmp = ALIEN_SQUID;
+                    invaders[idx].color = c_top;
+                } else {
+                    invaders[idx].bmp = ALIEN_CRAB;
+                    invaders[idx].color = c_mid;
+                }
+            } else if (pattern == 4) {
+                // Checkerboard Swarm: Alternating staggered arrangement with bats and squids
+                if ((r + c) % 2 == 1 && r < 3) {
+                    invaders[idx].x += 6;
+                    invaders[idx].bmp = ALIEN_BAT;
+                    invaders[idx].color = c_top;
+                } else {
+                    invaders[idx].bmp = (r == 0) ? ALIEN_SKULL : ALIEN_JELLY;
+                    invaders[idx].color = (r == 0) ? c_mid : c_bot;
+                }
             } else {
-                invaders[idx].color = COLOR_YELLOW;
-                invaders[idx].bmp = ALIEN_JELLY;
+                // Dread Armada: Front-line heavily armored crabs & skulls
+                if (r == 0) {
+                    invaders[idx].bmp = ALIEN_SKULL;
+                    invaders[idx].color = c_top;
+                } else if (r == 1) {
+                    invaders[idx].bmp = ALIEN_BAT;
+                    invaders[idx].color = c_mid;
+                } else {
+                    invaders[idx].bmp = (c % 2 == 0) ? ALIEN_CRAB : ALIEN_JELLY;
+                    invaders[idx].color = c_bot;
+                }
             }
         }
     }
@@ -1203,6 +1301,7 @@ static void reset_pong_game(void) {
 typedef struct { int x, y; } Point;
 static Point snake[200];
 static int snake_len = 4, snake_dir = 1; // 0=L, 1=R, 2=U, 3=D
+static int snake_input_dir = 1;
 static int food_x = 10, food_y = 10;
 static int snake_score = 0;
 static bool snake_game_over = false;
@@ -1213,7 +1312,7 @@ static void spawn_food(void) {
 }
 
 static void reset_snake_game(void) {
-    snake_len = 4; snake_dir = 1; snake_score = 0; snake_game_over = false;
+    snake_len = 4; snake_dir = 1; snake_input_dir = 1; snake_score = 0; snake_game_over = false;
     for (int i = 0; i < snake_len; i++) {
         snake[i].x = 8 - i; snake[i].y = 10;
     }
@@ -1744,13 +1843,14 @@ void app_main(void) {
                 if (inv_lives < 5) inv_lives++;
 
                 // Wave Clear Banner
-                st7789_fill_rect(15, 120, 210, 75, COLOR_DARKGRAY);
-                st7789_fill_rect(17, 122, 206, 71, COLOR_BLACK);
+                st7789_fill_rect(15, 115, 210, 85, COLOR_DARKGRAY);
+                st7789_fill_rect(17, 117, 206, 81, COLOR_BLACK);
                 char win_buf[32];
                 snprintf(win_buf, sizeof(win_buf), "WAVE %d CLEARED!", inv_level);
-                draw_string(25, 135, win_buf, COLOR_YELLOW, COLOR_BLACK, 2);
+                draw_string(25, 125, win_buf, COLOR_YELLOW, COLOR_BLACK, 2);
                 snprintf(win_buf, sizeof(win_buf), "+%d PTS  L:%d", 500 * inv_level, inv_lives);
-                draw_string(30, 165, win_buf, COLOR_GREEN, COLOR_BLACK, 1);
+                draw_string(30, 150, win_buf, COLOR_GREEN, COLOR_BLACK, 1);
+                draw_string(30, 170, inv_formation_name, COLOR_CYAN, COLOR_BLACK, 1);
                 fb_present();
                 sfx_line_clear();
                 vTaskDelay(pdMS_TO_TICKS(1500));
@@ -2107,11 +2207,18 @@ void app_main(void) {
                 continue;
             }
 
-            // Direction Input (D-Pad)
-            if (ev.left_pressed && snake_dir != 1) snake_dir = 0;
-            else if (ev.right_pressed && snake_dir != 0) snake_dir = 1;
-            else if (gpio_get_level(BTN_ROTATE) == 0 && snake_dir != 3) snake_dir = 2;
-            else if (gpio_get_level(BTN_DROP) == 0 && snake_dir != 2) snake_dir = 3;
+            // Direction Input (D-Pad): latch short clicks and levels so taps during ticks are never lost
+            bool req_left  = ev.left_pressed;
+            bool req_right = ev.right_pressed;
+            bool req_up    = (ev.rotate_short_click || gpio_get_level(BTN_ROTATE) == 0);
+            bool req_down  = (ev.drop_short_click   || gpio_get_level(BTN_DROP) == 0);
+
+            if (req_left && snake_dir != 1) snake_input_dir = 0;
+            else if (req_right && snake_dir != 0) snake_input_dir = 1;
+            else if (req_up && snake_dir != 3) snake_input_dir = 2;
+            else if (req_down && snake_dir != 2) snake_input_dir = 3;
+
+            snake_dir = snake_input_dir;
 
             // Erase Tail
             Point tail = snake[snake_len - 1];
