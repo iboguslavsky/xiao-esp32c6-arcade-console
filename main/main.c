@@ -39,6 +39,9 @@ static const char *TAG = "ARCADE";
 
 #define PIN_TFT_PWR     GPIO_NUM_17 // D7 - MOSFET gate: HIGH=TFT power ON, LOW=TFT power OFF
 
+// Inactivity timeout before entering deep sleep (5 minutes)
+#define INACTIVITY_TIMEOUT_US   300000000ULL
+
 // ============================================================================
 // DISPLAY CONFIGURATION
 // ============================================================================
@@ -86,11 +89,28 @@ typedef struct {
     bool drop_long_press;
 } ButtonEvents;
 
+#define BATTERY_ADC_UNIT        ADC_UNIT_1
+#define BATTERY_ADC_CHANNEL     ADC_CHANNEL_0 // GPIO0 (D0 / BTN_RIGHT)
+
+static adc_oneshot_unit_handle_t battery_adc_handle = NULL;
+
+static inline bool is_right_button_pressed(void) {
+    if (!battery_adc_handle) return false;
+    int raw = 4095;
+    if (adc_oneshot_read(battery_adc_handle, BATTERY_ADC_CHANNEL, &raw) == ESP_OK) {
+        // When pressed, D0 is shorted to GND (raw ADC near 0, typically < 100).
+        // When unpressed, D0 is held at VBAT/2 (~1.5V - 2.1V, raw ADC ~1800 - 2600).
+        // Threshold of 600 (~0.48V) cleanly discriminates even with battery near empty.
+        return (raw < 600);
+    }
+    return false;
+}
+
 static ButtonEvents get_button_events(void) {
     ButtonEvents ev = {0};
 
     ev.left_pressed  = (gpio_get_level(BTN_LEFT) == 0);
-    ev.right_pressed = (gpio_get_level(BTN_RIGHT) == 0);
+    ev.right_pressed = is_right_button_pressed();
 
     // ROTATE timing tracking
     static int64_t rot_start = 0;
@@ -259,6 +279,58 @@ static void fb_present(void) {
         offset += len;
         total_bytes -= len;
     }
+}
+
+// ============================================================================
+// POWER MANAGEMENT - MOSFET-GATED TFT DEEP SLEEP
+// ============================================================================
+static void enter_power_down_deep_sleep(void) {
+    sfx_powerdown();
+
+    // 1. ST7789 software shutdown sequence
+    st7789_cmd(0x28); // DISPOFF
+    vTaskDelay(pdMS_TO_TICKS(50));
+    st7789_cmd(0x10); // SLPIN
+    vTaskDelay(pdMS_TO_TICKS(120));
+
+    // 2. Kill TFT power via MOSFET (D7 LOW).
+    //    With VCC cut, there is NO backfeed path - no need to touch SPI pins.
+    gpio_set_level(PIN_TFT_PWR, 0);
+    vTaskDelay(pdMS_TO_TICKS(10));
+    gpio_hold_en((gpio_num_t)PIN_TFT_PWR); // Hold MOSFET off during sleep
+
+    // 3. Hold RST LOW as belt-and-suspenders (ST7789 in hardware reset)
+    gpio_set_level(PIN_NUM_RST, 0);
+    gpio_hold_en((gpio_num_t)PIN_NUM_RST);
+
+    // 4. Ensure LP-domain pull-ups on wakeup buttons survive deep sleep
+    // Note: BTN_RIGHT (GPIO0) shares the battery divider. Do NOT enable internal pullup on it!
+    gpio_pullup_dis(BTN_RIGHT);
+    gpio_pulldown_dis(BTN_RIGHT);
+    rtc_gpio_pullup_dis(BTN_RIGHT);
+    rtc_gpio_pulldown_dis(BTN_RIGHT);
+    gpio_sleep_set_pull_mode(BTN_RIGHT, GPIO_FLOATING);
+
+    // Pull-ups only for buttons that do not share the battery divider
+    gpio_pullup_en((gpio_num_t)BTN_LEFT);
+    gpio_pullup_en((gpio_num_t)BTN_ROTATE);
+
+    // 5. Wait for DROP to be released, then wait for wakeup buttons to be
+    //    clearly HIGH. Wakeup is level-triggered LOW — any LOW pin at sleep
+    //    entry causes an immediate spurious wakeup.
+    while (gpio_get_level(BTN_DROP)   == 0) vTaskDelay(pdMS_TO_TICKS(20));
+    while (gpio_get_level(BTN_LEFT)   == 0 ||
+           gpio_get_level(BTN_ROTATE) == 0) {
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    vTaskDelay(pdMS_TO_TICKS(500)); // Extra debounce — hand fully away
+
+    // 6. Arm wakeup on BTN_LEFT and BTN_ROTATE and enter deep sleep
+    // Note: Do NOT put BTN_RIGHT in wakeup mask, because ESP-IDF sleep driver
+    // automatically turns on internal pull-up and pad hold on wakeup pins!
+    uint64_t mask = (1ULL << BTN_LEFT) | (1ULL << BTN_ROTATE);
+    esp_deep_sleep_enable_gpio_wakeup(mask, ESP_GPIO_WAKEUP_GPIO_LOW);
+    esp_deep_sleep_start();
 }
 
 static void st7789_fill_rect(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t color) {
@@ -461,13 +533,10 @@ static void draw_game_over_modal(const char *title, uint32_t score, int level, u
 
 // ============================================================================
 // BATTERY MONITORING SUBSYSTEM (ADC on BTN_RIGHT / D0 / GPIO0 / ADC1_CH0)
-// Multiplexed with BTN_RIGHT via R1=100k (to VBAT) and R2=220k (to GND)
+// Multiplexed with BTN_RIGHT via R1=180k (to VBAT) and R2=180k (to GND)
 // ============================================================================
-#define BATTERY_ADC_UNIT        ADC_UNIT_1
-#define BATTERY_ADC_CHANNEL     ADC_CHANNEL_0 // GPIO0 (D0 / BTN_RIGHT)
 #define BATTERY_DIVIDER_RATIO   0.5000f       // 180k / (180k + 180k) = 0.5000
 
-static adc_oneshot_unit_handle_t battery_adc_handle = NULL;
 static adc_cali_handle_t battery_cali_handle = NULL;
 static float battery_cached_voltage = 3.90f;   // Start with reasonable default ~75%
 static int battery_cached_percent = 75;
@@ -591,6 +660,47 @@ static void draw_battery_indicator(uint16_t x, uint16_t y) {
     if (bars >= 1) st7789_fill_rect(x + 2,  y + 2, 4, 5, bar_color);
     if (bars >= 2) st7789_fill_rect(x + 7,  y + 2, 4, 5, bar_color);
     if (bars >= 3) st7789_fill_rect(x + 12, y + 2, 4, 5, bar_color);
+}
+
+// Blocks while a modal is displayed until ROTATE is pressed, DROP is long-pressed (sleep),
+// or the inactivity timeout (5 min) expires (deep sleep).
+static void wait_modal_confirm_or_timeout(void) {
+    int64_t modal_start = esp_timer_get_time();
+    int64_t drop_hold_start = 0;
+    bool drop_held = false;
+
+    while (1) {
+        // Periodic battery voltage update while modal is sitting on screen
+        check_battery_periodic();
+
+        // 1. Check user confirm (ROTATE button pressed -> LOW)
+        if (gpio_get_level(BTN_ROTATE) == 0) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+            // Wait for release to avoid instant double click
+            while (gpio_get_level(BTN_ROTATE) == 0) vTaskDelay(pdMS_TO_TICKS(20));
+            vTaskDelay(pdMS_TO_TICKS(100));
+            return;
+        }
+
+        // 2. Immediate manual power-off: Holding DROP for > 1 sec in modal
+        if (gpio_get_level(BTN_DROP) == 0) {
+            if (!drop_held) {
+                drop_held = true;
+                drop_hold_start = esp_timer_get_time();
+            } else if ((esp_timer_get_time() - drop_hold_start) >= 1000000ULL) {
+                enter_power_down_deep_sleep();
+            }
+        } else {
+            drop_held = false;
+        }
+
+        // 3. Auto-shutdown: inactivity timeout reached in modal -> deep sleep
+        if ((esp_timer_get_time() - modal_start) >= INACTIVITY_TIMEOUT_US) {
+            enter_power_down_deep_sleep();
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(30));
+    }
 }
 
 // ============================================================================
@@ -1246,61 +1356,6 @@ static void draw_scaled_traffic_obj(int center_x, int screen_y, float z, uint16_
 
 
 // ============================================================================
-// POWER MANAGEMENT - MOSFET-GATED TFT DEEP SLEEP
-// ============================================================================
-static void enter_power_down_deep_sleep(void) {
-    sfx_powerdown();
-
-    // 1. ST7789 software shutdown sequence
-    st7789_cmd(0x28); // DISPOFF
-    vTaskDelay(pdMS_TO_TICKS(50));
-    st7789_cmd(0x10); // SLPIN
-    vTaskDelay(pdMS_TO_TICKS(120));
-
-    // 2. Kill TFT power via MOSFET (D7 LOW).
-    //    With VCC cut, there is NO backfeed path - no need to touch SPI pins.
-    gpio_set_level(PIN_TFT_PWR, 0);
-    vTaskDelay(pdMS_TO_TICKS(10));
-    gpio_hold_en((gpio_num_t)PIN_TFT_PWR); // Hold MOSFET off during sleep
-
-    // 3. Hold RST LOW as belt-and-suspenders (ST7789 in hardware reset)
-    gpio_set_level(PIN_NUM_RST, 0);
-    gpio_hold_en((gpio_num_t)PIN_NUM_RST);
-
-    // 4. Ensure LP-domain pull-ups on wakeup buttons survive deep sleep
-    // Note: BTN_RIGHT (GPIO0) shares the battery divider. Do NOT enable internal pullup on it!
-    gpio_pullup_dis(BTN_RIGHT);
-    gpio_pulldown_dis(BTN_RIGHT);
-    rtc_gpio_pullup_dis(BTN_RIGHT);
-    rtc_gpio_pulldown_dis(BTN_RIGHT);
-    gpio_sleep_set_pull_mode(BTN_RIGHT, GPIO_FLOATING);
-
-    // Pull-ups only for buttons that do not share the battery divider
-    gpio_pullup_en((gpio_num_t)BTN_LEFT);
-    gpio_pullup_en((gpio_num_t)BTN_ROTATE);
-
-    // 5. Wait for DROP to be released, then wait for wakeup buttons to be
-    //    clearly HIGH. Wakeup is level-triggered LOW — any LOW pin at sleep
-    //    entry causes an immediate spurious wakeup.
-    while (gpio_get_level(BTN_DROP)   == 0) vTaskDelay(pdMS_TO_TICKS(20));
-    while (gpio_get_level(BTN_LEFT)   == 0 ||
-           gpio_get_level(BTN_ROTATE) == 0) {
-        vTaskDelay(pdMS_TO_TICKS(20));
-    }
-    vTaskDelay(pdMS_TO_TICKS(500)); // Extra debounce — hand fully away
-
-    // 6. Arm wakeup on BTN_LEFT and BTN_ROTATE and enter deep sleep
-    // Note: Do NOT put BTN_RIGHT in wakeup mask, because ESP-IDF sleep driver
-    // automatically turns on internal pull-up and pad hold on wakeup pins!
-    uint64_t mask = (1ULL << BTN_LEFT) | (1ULL << BTN_ROTATE);
-    esp_deep_sleep_enable_gpio_wakeup(mask, ESP_GPIO_WAKEUP_GPIO_LOW);
-    esp_deep_sleep_start();
-}
-
-
-
-
-// ============================================================================
 // ARCADE LAUNCHER MENU
 // ============================================================================
 static int menu_selected = 0;
@@ -1437,8 +1492,8 @@ void app_main(void) {
             last_activity_time = esp_timer_get_time();
         }
 
-        // AUTO-SHUTDOWN: 5 minutes (300,000,000 us) of inactivity -> Deep Sleep
-        if ((esp_timer_get_time() - last_activity_time) >= 300000000ULL) {
+        // AUTO-SHUTDOWN: 5 minutes of inactivity -> Deep Sleep
+        if ((esp_timer_get_time() - last_activity_time) >= INACTIVITY_TIMEOUT_US) {
             enter_power_down_deep_sleep();
         }
 
@@ -1491,9 +1546,11 @@ void app_main(void) {
             if (t_game_over) {
                 draw_game_over_modal("GAME OVER!", t_score, t_level, COLOR_RED);
                 sfx_game_over();
-                while (gpio_get_level(BTN_ROTATE) != 0) vTaskDelay(pdMS_TO_TICKS(50));
-                vTaskDelay(pdMS_TO_TICKS(200)); reset_tetris_game();
-                last_drop_time = esp_timer_get_time(); continue;
+                wait_modal_confirm_or_timeout();
+                reset_tetris_game();
+                last_activity_time = esp_timer_get_time();
+                last_drop_time = esp_timer_get_time();
+                continue;
             }
 
             if (ev.left_pressed) {
@@ -1543,8 +1600,10 @@ void app_main(void) {
             if (inv_game_over) {
                 draw_game_over_modal("GAME OVER!", inv_score, inv_level, COLOR_RED);
                 sfx_game_over();
-                while (gpio_get_level(BTN_ROTATE) != 0) vTaskDelay(pdMS_TO_TICKS(50));
-                vTaskDelay(pdMS_TO_TICKS(200)); reset_space_invaders(); continue;
+                wait_modal_confirm_or_timeout();
+                reset_space_invaders();
+                last_activity_time = esp_timer_get_time();
+                continue;
             }
 
             // Clear RAM Framebuffer for 100% flicker-free rendering
@@ -1720,8 +1779,10 @@ void app_main(void) {
             if (brk_game_over) {
                 draw_game_over_modal("GAME OVER!", brk_score, brk_level, COLOR_RED);
                 sfx_game_over();
-                while (gpio_get_level(BTN_ROTATE) != 0) vTaskDelay(pdMS_TO_TICKS(50));
-                vTaskDelay(pdMS_TO_TICKS(200)); reset_breakout(); continue;
+                wait_modal_confirm_or_timeout();
+                reset_breakout();
+                last_activity_time = esp_timer_get_time();
+                continue;
             }
 
             // Clear RAM Framebuffer
@@ -1891,8 +1952,10 @@ void app_main(void) {
                 if (player_score >= 9) draw_game_over_modal("YOU WIN!", player_score, 0, COLOR_GREEN);
                 else draw_game_over_modal("COMP WINS!", comp_score, 0, COLOR_RED);
                 sfx_game_over();
-                while (gpio_get_level(BTN_ROTATE) != 0) vTaskDelay(pdMS_TO_TICKS(50));
-                vTaskDelay(pdMS_TO_TICKS(200)); reset_pong_game(); continue;
+                wait_modal_confirm_or_timeout();
+                reset_pong_game();
+                last_activity_time = esp_timer_get_time();
+                continue;
             }
 
             // --- PHYSICS & INPUT ---
@@ -2038,8 +2101,10 @@ void app_main(void) {
             if (snake_game_over) {
                 draw_game_over_modal("GAME OVER!", snake_score, 0, COLOR_RED);
                 sfx_game_over();
-                while (gpio_get_level(BTN_ROTATE) != 0) vTaskDelay(pdMS_TO_TICKS(50));
-                vTaskDelay(pdMS_TO_TICKS(200)); reset_snake_game(); continue;
+                wait_modal_confirm_or_timeout();
+                reset_snake_game();
+                last_activity_time = esp_timer_get_time();
+                continue;
             }
 
             // Direction Input (D-Pad)
@@ -2105,8 +2170,10 @@ void app_main(void) {
             if (flappy_game_over) {
                 draw_game_over_modal("GAME OVER!", flappy_score, flappy_level, COLOR_RED);
                 sfx_game_over();
-                while (gpio_get_level(BTN_ROTATE) != 0) vTaskDelay(pdMS_TO_TICKS(50));
-                vTaskDelay(pdMS_TO_TICKS(200)); reset_flappy_game(); continue;
+                wait_modal_confirm_or_timeout();
+                reset_flappy_game();
+                last_activity_time = esp_timer_get_time();
+                continue;
             }
 
             // Clear RAM Framebuffer for 100% flicker-free rendering
@@ -2186,8 +2253,10 @@ void app_main(void) {
             if (racer_game_over) {
                 draw_game_over_modal("CRASHED!", racer_score, 0, COLOR_RED);
                 sfx_game_over();
-                while (gpio_get_level(BTN_ROTATE) != 0) vTaskDelay(pdMS_TO_TICKS(50));
-                vTaskDelay(pdMS_TO_TICKS(200)); reset_racer_game(); continue;
+                wait_modal_confirm_or_timeout();
+                reset_racer_game();
+                last_activity_time = esp_timer_get_time();
+                continue;
             }
 
             // --- CONTROLS & SPEED PHYSICS ---
